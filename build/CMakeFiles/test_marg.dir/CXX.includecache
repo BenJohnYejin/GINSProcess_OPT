@@ -56,9 +56,9 @@ cstdint
 alg_lib.h
 ../src/alg_lib.h
 
-/mnt/d/02_mydocu/01_software/factor/ipos3_myob/test/test_marg.cpp
+/mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT/test/test_marg.cpp
 alg_lib.h
-/mnt/d/02_mydocu/01_software/factor/ipos3_myob/test/alg_lib.h
+/mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT/test/alg_lib.h
 cmath
 -
 cstdio

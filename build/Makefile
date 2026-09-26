@@ -48,10 +48,10 @@ RM = /usr/bin/cmake -E remove -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /mnt/d/02_mydocu/01_software/factor/ipos3_myob
+CMAKE_SOURCE_DIR = /mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /mnt/d/02_mydocu/01_software/factor/ipos3_myob/build
+CMAKE_BINARY_DIR = /mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT/build
 
 #=============================================================================
 # Targets provided globally by CMake.
@@ -80,9 +80,9 @@ rebuild_cache/fast: rebuild_cache
 
 # The main all target
 all: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /mnt/d/02_mydocu/01_software/factor/ipos3_myob/build/CMakeFiles /mnt/d/02_mydocu/01_software/factor/ipos3_myob/build/CMakeFiles/progress.marks
+	$(CMAKE_COMMAND) -E cmake_progress_start /mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT/build/CMakeFiles /mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT/build/CMakeFiles/progress.marks
 	$(MAKE) -f CMakeFiles/Makefile2 all
-	$(CMAKE_COMMAND) -E cmake_progress_start /mnt/d/02_mydocu/01_software/factor/ipos3_myob/build/CMakeFiles 0
+	$(CMAKE_COMMAND) -E cmake_progress_start /mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT/build/CMakeFiles 0
 .PHONY : all
 
 # The main clean target

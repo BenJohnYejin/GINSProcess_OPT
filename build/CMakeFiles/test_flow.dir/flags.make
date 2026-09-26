@@ -6,5 +6,5 @@ CXX_FLAGS = -O3 -DNDEBUG   -std=gnu++17
 
 CXX_DEFINES = 
 
-CXX_INCLUDES = -I/mnt/d/02_mydocu/01_software/factor/ipos3_myob/src -isystem /usr/include/eigen3 
+CXX_INCLUDES = -I/mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT/src -isystem /usr/include/eigen3 
 

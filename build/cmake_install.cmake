@@ -1,4 +1,4 @@
-# Install script for directory: /mnt/d/02_mydocu/01_software/factor/ipos3_myob
+# Install script for directory: /mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
@@ -45,5 +45,5 @@ endif()
 
 string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
        "${CMAKE_INSTALL_MANIFEST_FILES}")
-file(WRITE "/mnt/d/02_mydocu/01_software/factor/ipos3_myob/build/${CMAKE_INSTALL_MANIFEST}"
+file(WRITE "/mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT/build/${CMAKE_INSTALL_MANIFEST}"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")
