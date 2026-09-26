@@ -1,0 +1,2 @@
+/usr/bin/ar qc libipos3_opt_lib.a  CMakeFiles/ipos3_opt_lib.dir/src/alg_lib.cpp.o
+/usr/bin/ranlib libipos3_opt_lib.a

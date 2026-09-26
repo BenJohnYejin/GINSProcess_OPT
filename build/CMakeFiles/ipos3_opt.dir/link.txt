@@ -1,0 +1,1 @@
+/usr/bin/c++  -O3 -DNDEBUG   CMakeFiles/ipos3_opt.dir/src/main.cpp.o  -o ipos3_opt  libipos3_opt_lib.a /usr/local/lib/libceres.a /usr/lib/x86_64-linux-gnu/libglog.so -lpthread /usr/lib/x86_64-linux-gnu/liblapack.so /usr/lib/x86_64-linux-gnu/libblas.so 
