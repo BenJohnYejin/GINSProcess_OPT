@@ -27,9 +27,6 @@
 
 /* 基础常量（PI / DEG / G0 / NUM_* ...）：本文件用，也在 app_interface.h 里
  * 统一对外暴露。末尾由 app_interface.h 反向引入本文件，完成"只引一个头"。 */
-#include "app_interface.h"
-
-#include "app_interface.h"
 
 #include <array>
 #include <algorithm>
@@ -51,6 +48,82 @@
 #include <Eigen/Eigenvalues>
 #include <ceres/ceres.h>
 
+constexpr double const_sqrt(double x, double guess) {
+    double r = guess;
+    for (int i = 0; i < 60; i++) {
+        r = 0.5 * (r + x / r);
+    }
+    return r;
+}
+
+constexpr double PI   = 3.1415926535897932;
+constexpr double _2PI = 2.0 * PI;
+constexpr double DEG  = PI / 180.0;   /*< 度 -> 弧度 */
+constexpr double HUR  = 3600.0;
+constexpr double SHUR = 60.0;
+constexpr double DPS  = DEG;          /*< deg/s   -> rad/s   */
+constexpr double DPH  = DEG / HUR;    /*< deg/hr  -> rad/s   */
+constexpr double DPSH = DEG / SHUR;   /*< deg/sqrt(hr) -> rad/sqrt(s) */
+constexpr double G0 = 9.7803267714;
+constexpr double MG = G0 / 1.0e3;
+constexpr double UG = G0 / 1.0e6;
+constexpr double RE_WGS84 = 6378137.0;
+constexpr double FE_WGS84 = 1.0 / 298.257223563;
+constexpr double RE       = 6378137.0;
+constexpr double f0_earth = 1.0 / 298.257;
+constexpr double wie0     = 7.2921151467e-5;
+constexpr double RP = (1.0 - f0_earth) * RE; /*< 极半径 */
+constexpr double e_earth = const_sqrt(2.0 * f0_earth - f0_earth * f0_earth, 0.08);
+constexpr double e2      = e_earth * e_earth;
+constexpr double ep2     = e2 / (1.0 - e2);
+constexpr double ep_earth = const_sqrt(ep2, 0.08);
+constexpr double EPS   = 2.220446049e-16;
+constexpr double INF   = 3.402823466e+30;
+constexpr double INFp5 = INF * 0.5;
+
+/* 参数块维数 ---------------------------------------------------------------------*/
+constexpr int NUM_POSE      = 7;  /*< p(3) + q(4) */
+constexpr int NUM_MIX       = 9;  /*< v(3) + bg(3) + ba(3) */
+constexpr int NUM_MIX_ODO   = 10; /*< 再加上里程计比例因子误差 sodo */
+constexpr int NUM_STATE     = 15; /*< 预积分残差维数 */
+constexpr int NUM_STATE_ODO = 19; /*< 再加上里程位移(3) 与比例因子(1) */
+constexpr int NUM_NOISE     = 12; /*< IMU 噪声维数 */
+constexpr int NUM_NOISE_ODO = 16; /*< 再加上里程计白噪声(3) 与比例因子随机游走(1) */
+constexpr int NUM_CALIB     = 7;  /*< {sodo, abv_p, abv_y, lvOD_x, lvOD_y, lvOD_z, yaw_off} */
+
+static constexpr int STATE_DIM = NUM_STATE;  /*< 15 */
+static constexpr int NOISE_DIM = NUM_NOISE;  /*< 12 */
+
+using RowMajorMatrix = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+using CovMatrix   = Eigen::Matrix<double, STATE_DIM, STATE_DIM>;
+using JacMatrix   = Eigen::Matrix<double, STATE_DIM, STATE_DIM>;
+using NoiseMatrix = Eigen::Matrix<double, NOISE_DIM, NOISE_DIM>;
+using GainMatrix  = Eigen::Matrix<double, STATE_DIM, NOISE_DIM>;
+/* ============================================================
+ * 15 维基础流形（p, q, v, bg, ba）
+ * ============================================================ */
+using DeltaN = Eigen::Matrix<double, NUM_STATE, 1>;   // 15×1
+/* ============================================================
+ * 16 维流形（在 15 维基础上扩展里程计比例因子 sodo）
+ * ============================================================ */
+using DeltaNOdo = Eigen::Matrix<double, NUM_STATE + 1, 1>;  // 16×1
+
+inline bool isInfSentinel(double v) { return v > 2.0 * INF; }
+template <class T>
+inline void swapt(T &a, T &b) {
+    T c = a;
+    a   = b;
+    b   = c;
+}
+
+enum AntMode {
+    ANT_MODE_FB_B = 0,  /*< 基线前后、输出指车尾：原样 */
+    ANT_MODE_FB_F = 1,  /*< 基线前后、输出指车头：再转 180° */
+    ANT_MODE_LR_L = 2,  /*< 基线左右、输出指左侧：再转 +90° */
+    ANT_MODE_LR_R = 3,  /*< 基线左右、输出指右侧：再转 -90° */
+    ANT_MODE_ONE  = 4,  /*< 单天线，航向不可用 */
+};
+
 class mat3;
 class quat;
 class mat;   
@@ -58,6 +131,12 @@ class vect;
 class vect3;
 class earth;
 class Preintegration;
+
+/* ---------- 常用常量（定义在 ipos_fixed.cpp） ---------- */
+extern vect3 O31;   /*< 零矢量 */
+extern vect3 One31; /*< 全 1 矢量 */
+extern mat3 I33;    /*< 单位阵 */
+extern quat qI;     /*< 单位四元数 */
 
 mat3 Rot(double angle, char axis);
 mat3 rcijk(const mat3 &m, int ijk);
@@ -200,16 +279,6 @@ public:
     friend quat operator~(const quat &q);
 };
 
-/* ---------- 常用常量（定义在 ipos_fixed.cpp） ---------- */
-extern vect3 O31;   /*< 零矢量 */
-extern vect3 One31; /*< 全 1 矢量 */
-extern mat3 I33;    /*< 单位阵 */
-extern quat qI;     /*< 单位四元数 */
-
-
-using RowMajorMatrix =
-    Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-
 /* ============================================================================
  * vect
  * ==========================================================================*/
@@ -349,30 +418,18 @@ private:
     void bind(void) { dd = E.data(); }
 };
 
-int IsZeros(const vect3 &v, double eps = EPS);
-int IsZero(const double &val, double eps = EPS);
-uint8_t IsZerosXY(const vect3 &v, double eps = EPS);
-uint8_t IsNaN(const vect3 &v);
-double diffYaw(double yaw, double yaw0);
-vect3 abs(const vect3 &v);
-vect3 maxabs(const vect3 &v1, const vect3 &v2);
-double norm(const vect3 &v);
-double normInf(const vect3 &v);
-double normXY(const vect3 &v);
-double normXYInf(const vect3 &v);
-vect3 sqrt(const vect3 &v);
-vect3 pow(const vect3 &v, int k);
-double dot(const vect3 &v1, const vect3 &v2);
-vect3 dotmul(const vect3 &v1, const vect3 &v2);
-mat3 vxv(const vect3 &v1, const vect3 &v2);
-double sinAng(const vect3 &v1, const vect3 &v2);
-vect3 sort(const vect3 &v);
-vect3 randn(const vect3 &mu, const vect3 &sigma);
-double MKQt(double sR, double tau);
-vect3 MKQt(const vect3 &sR, const vect3 &tau);
-
+/* ============================================================================
+ * 辅助：vect3 → Eigen 类型（支持 AutoDiff 的 Jet<T>）
+ * ==========================================================================*/
+template <typename T>
+inline Eigen::Matrix<T, 3, 1> toEig3(const vect3 &v) {
+    return Eigen::Matrix<T, 3, 1>(T(v.i), T(v.j), T(v.k));
+}
+template <typename T>
+inline Eigen::Quaternion<T> toEigQ(const quat &q) {
+    return Eigen::Quaternion<T>(T(q.q0), T(q.q1), T(q.q2), T(q.q3));
+}
 /* ============================ 姿态 / 旋转 ============================ */
-
 mat3 a2mat(const vect3 &att);           /*< [pitch,roll,yaw]   -> Cnb  */
 quat a2qua(double pitch, double roll, double yaw);
 quat a2qua(const vect3 &att);
@@ -403,7 +460,6 @@ vect3 vn2att(const vect3 &vn);
 double vn2att(double vel_east, double vel_north);
 
 /* ============================ mat3 线性代数 ============================ */
-
 mat3 Rot(double angle, char axis);
 mat3 rcijk(const mat3 &m, int ijk);
 double trMMT(const mat3 &m1, const mat3 &m2 = I33);
@@ -422,7 +478,6 @@ double norm(const mat3 &m);
 mat3 randn(const mat3 &mu, const double &sigma);
 
 /* ============================ vect 线性代数 ============================ */
-
 vect abs(const vect &v);
 double norm(const vect &v);
 double norm1(const vect &v);
@@ -434,7 +489,6 @@ vect dotmul(const vect &v1, const vect &v2);
 vect randn(const vect &mu, const vect &sigma);
 
 /* ============================ mat 线性代数 ============================ */
-
 void symmetry(mat &m);
 double trace(const mat &m);
 double norm1(const mat &m);
@@ -448,22 +502,10 @@ void RowMul(mat &m, const mat &m0, const mat &m1, int r, int fast = 0);
 void RowMulT(mat &m, const mat &m0, const mat &m1, int r, int fast = 0);
 void DVMDVafa(const vect &V, mat &M, double afa);
 mat randn(const mat &mu, const double &sigma);
-
-/* ============================ 扩展：Eigen 线性代数 ============================
- * ==========================================================================*/
-/* 下三角 Cholesky：A = L * L^T。A 非正定时返回 0x0 的空矩阵 ----------------------*/
 mat llt_L(const mat &A);
-
-/* 返回 L^{-T}，满足 S^T * S = A^{-1}（即"白化矩阵"） -----------------------------*/
 mat llt_sqrtinv(const mat &A);
-
-/* 对称正定矩阵求逆 ---------------------------------------------------------------*/
 mat llt_inv(const mat &A);
-
-/* 对称矩阵的伪逆（特征分解，小特征值置零），用于秩亏的法方程 ----------------------*/
 mat pinv_sym(const mat &A, double eps = 1e-10);
-
-/* H += J^T J,  b += J^T r （J 的列数必须与 H 的维数一致） -------------------------*/
 void accumulate_normal_equations(const mat &J, const vect &r, mat &H, vect &b);
 
 /* Schur 补 ----------------------------------------------------------------------
@@ -479,156 +521,7 @@ vect3 xyz2blh(const vect3 &xyz);
 vect3 blh2xyz(const vect3 &blh);
 vect3 Vxyz2enu(const vect3 &Vxyz, const vect3 &pos);
 
-/* ============================ 融合 ============================ */
 
-void fusion(double *x1, double *p1, const double *x2, const double *p2, int n = 9,
-            double *xf = nullptr, double *pf = nullptr);
-void fusion(vect3 &x1, vect3 &p1, const vect3 x2, const vect3 p2);
-void fusion(vect3 &x1, vect3 &p1, const vect3 x2, const vect3 p2, vect3 &xf, vect3 &pf);
-
-struct PreintegrationParam {
-    double gyr_arw{0.0};      /*< 角度随机游走 rad/sqrt(s) */
-    double acc_vrw{0.0};      /*< 速度随机游走 m/s^1.5 */
-    double gyr_bias_std{0.0}; /*< 陀螺零偏标准差 rad/s */
-    double acc_bias_std{0.0}; /*< 加表零偏标准差 m/s^2 */
-    double corr_time{3600.0}; /*< 零偏一阶马尔可夫相关时间 s */
-
-    /* ---- 里程计（use_odometer = true 时生效）---- */
-    vect3 odo_std;             /*< 单次里程增量的白噪声标准差 (m) */
-    double odo_srw{0.0};       /*< 里程计比例因子随机游走 (1/sqrt(s)) */
-    vect3 abv;                 /*< 安装角 [pitch, 0, yaw]，与 ipos3g 的 odo::ODKappa 一致 */
-    vect3 lvOD;                /*< 里程计杆臂（b 系，m） */
-};
-
-/* 关键帧状态 ---------------------------------------------------------------------*/
-struct State {
-    double time{0.0};
-    vect3 p;                       /*< 局部 NEU 位置 (m) */
-    quat q{1.0, 0.0, 0.0, 0.0};    /*< b -> n */
-    vect3 v;                       /*< n 系速度 (m/s) */
-    vect3 bg;                      /*< 陀螺零偏 (rad/s) */
-    vect3 ba;                      /*< 加表零偏 (m/s^2) */
-    double sodo{0.0};              /*< 里程计比例因子误差（无量纲） */
-    vect3 s;                       /*< 预积分里程位移（b0 系，m），仅内部使用 */
-};
-
-/* 观测 ---------------------------------------------------------------------------*/
-struct ImuMeas {
-    double time{0.0};
-    double dt{0.0};
-    vect3 dtheta; /*< 角增量 (rad) */
-    vect3 dvel;   /*< 速度增量 (m/s) */
-    double odovel{0.0}; /*< 本次采样间隔内的里程增量 (m)，对应 OB_GINS 的 imu.odovel */
-};
-
-struct GnssMeas {
-    double time{0.0};
-    vect3 blh;    /*< {lat, lon, h}，弧度/米 */
-    vect3 std;    /*< 位置 {sigma_E, sigma_N, sigma_U}，米（局部 NEU） */
-    vect3 vn;     /*< n 系速度 (m/s)，需要时填（ipos3g 的 KF 就用它） */
-    vect3 vn_std; /*< 速度标准差 (m/s) */
-    double yaw{0.0};     /*< 双天线航向 (rad)，yaw_std<=0 表示无效 */
-    double yaw_std{0.0}; /*< 航向标准差 (rad) */
-};
-
-struct OdoMeas {
-    double time{0.0};
-    double ds{0.0}; /*< 里程增量 (m) */
-    double dt{0.0};
-};
-
-
-/* ============================================================================
- * 全局标定状态（滑窗内所有帧共享同一份，不随时间变化）
- *
- * 参数：sodo, abv_pitch, abv_yaw, lvOD(3), yaw_gnss_offset
- * 参数化：全部加性，无需流形
- * 数据布局：calib[0..6] = {sodo, ap, ay, lx, ly, lz, yoff}
- * ==========================================================================*/
-
-struct CalibState {
-    double sodo{0.0};             /*< 里程计刻度因子误差 */
-    double abv_pitch{0.0};        /*< 里程计安装俯仰角 (rad) */
-    double abv_yaw{0.0};          /*< 里程计安装偏航角 (rad) */
-    vect3  lvOD{0.0, 0.0, 0.0};   /*< 里程计杆臂 (b 系，m) */
-    double yaw_gnss_offset{0.0};  /*< 双天线航向偏置 (rad) */
-
-    void toData(double *d) const {
-        d[0] = sodo;
-        d[1] = abv_pitch;
-        d[2] = abv_yaw;
-        d[3] = lvOD.i;
-        d[4] = lvOD.j;
-        d[5] = lvOD.k;
-        d[6] = yaw_gnss_offset;
-    }
-    void fromData(const double *d) {
-        sodo            = d[0];
-        abv_pitch       = d[1];
-        abv_yaw         = d[2];
-        lvOD            = vect3(d[3], d[4], d[5]);
-        yaw_gnss_offset = d[6];
-    }
-};
-
-/* 一个关键帧 ----------------------------------------------------------------------*/
-struct Frame {
-    double time{0.0};
-    /* Ceres 参数块（顺序与 gopt_types.h 一致）。数组固定长度，保证地址稳定 ----*/
-    std::array<double, NUM_POSE> pose{};     /*< {pE,pN,pU, qx,qy,qz,qw} */
-    std::array<double, NUM_MIX_ODO> mix{};   /*< {v, bg, ba [, sodo]} */
-
-    /* 到下一关键帧的预积分（最后一帧为空） ----------------------------------*/
-    std::shared_ptr<Preintegration> pre_to_next;
-
-    /* 该帧上的 GNSS 位置观测（已转到局部 ENU） -------------------------------*/
-    bool has_gnss{false};
-    vect3 gnss_pos{};
-    vect3 gnss_std{1.0, 1.0, 1.0};
-    vect3 gnss_std0{1.0, 1.0, 1.0}; /*< 原始 std，重加权时以它为基准（避免累乘） */
-    double gnss_time{0.0};
-    bool   gnss_in_gap{false};      /*< 该帧落在模拟的 GNSS 中断区间（只做参考，不入因子） */
-
-    /* 该帧上的 GNSS 速度观测 ------------------------------------*/
-    bool has_gnss_vel{false};
-    vect3 gnss_vn{};
-    vect3 gnss_vn_std{1.0, 1.0, 1.0};
-
-    /* 静止段标记（由 IMU 判据得到，见 Estimator::updateStaticDetector） -------------*/
-    bool is_static{false};
-    bool has_yaw_hold{false};
-    double yaw_ref{0.0};
-
-    /* 双天线航向观测 ------------------------------------------------------------*/
-    bool has_gnss_yaw{false};
-    double gnss_yaw{0.0};
-    double gnss_yaw_std{0.0};
-
-    /* 原始双天线航向（已按天线安装方式折算到内部 yaw）。无论是否启用航向因子
-     * 都会记录，用于统计"估计航向 vs 双天线航向"的一致性。 */
-    bool   has_raw_yaw{false};
-    double raw_yaw_conv{0.0};
-
-    /* FEJ：该帧的线性化点 --------------------*/
-    bool has_lin{false};
-    std::array<double, NUM_POSE> pose_lin{};
-    std::array<double, NUM_MIX_ODO> mix_lin{};
-
-    /* 里程计速度观测（前向速度，b 系） ------------------------------------ */
-    bool   has_odo{false};
-    double odo_dS{0.0};               /*< 里程增量 (m) */
-    double odo_dt{0.0};               /*< 对应时间间隔 (s) */
-    vect3  odo_omega_meas{};          /*< 该段陀螺原始测量 (rad/s)，用于杆臂补偿 */
-    double odo_std{0.05};             /*< 里程速度标准差 (m/s) */
-};
-
-mat3 Rot(double angle, char axis);
-mat3 rcijk(const mat3 &m, int ijk);
-void normlize(quat *q);
-
-/* ============================================================================
- * vect3
- * ==========================================================================*/
 class earth {
 public:
     double a;      /*< 长半轴 */
@@ -736,8 +629,231 @@ public:
     double Update(const vect3 *pwm, const vect3 *pvm, int nSamples, double ts);
 };
 
+struct PreintegrationParam {
+    double gyr_arw{0.0};      /*< 角度随机游走 rad/sqrt(s) */
+    double acc_vrw{0.0};      /*< 速度随机游走 m/s^1.5 */
+    double gyr_bias_std{0.0}; /*< 陀螺零偏标准差 rad/s */
+    double acc_bias_std{0.0}; /*< 加表零偏标准差 m/s^2 */
+    double corr_time{3600.0}; /*< 零偏一阶马尔可夫相关时间 s */
+
+    /* ---- 里程计（use_odometer = true 时生效）---- */
+    vect3 odo_std;             /*< 单次里程增量的白噪声标准差 (m) */
+    double odo_srw{0.0};       /*< 里程计比例因子随机游走 (1/sqrt(s)) */
+    vect3 abv;                 /*< 安装角 [pitch, 0, yaw]，与 ipos3g 的 odo::ODKappa 一致 */
+    vect3 lvOD;                /*< 里程计杆臂（b 系，m） */
+};
+
+/* 关键帧状态 ---------------------------------------------------------------------*/
+struct State {
+    double time{0.0};
+    vect3 p;                       /*< 局部 NEU 位置 (m) */
+    quat q{1.0, 0.0, 0.0, 0.0};    /*< b -> n */
+    vect3 v;                       /*< n 系速度 (m/s) */
+    vect3 bg;                      /*< 陀螺零偏 (rad/s) */
+    vect3 ba;                      /*< 加表零偏 (m/s^2) */
+    double sodo{0.0};              /*< 里程计比例因子误差（无量纲） */
+    vect3 s;                       /*< 预积分里程位移（b0 系，m），仅内部使用 */
+};
+
+/* 观测 ---------------------------------------------------------------------------*/
+struct ImuMeas {
+    double time{0.0};
+    double dt{0.0};
+    vect3 dtheta; /*< 角增量 (rad) */
+    vect3 dvel;   /*< 速度增量 (m/s) */
+    double odovel{0.0}; /*< 本次采样间隔内的里程增量 (m)，对应 OB_GINS 的 imu.odovel */
+};
+
+struct GnssMeas {
+    double time{0.0};
+    vect3 blh;    /*< {lat, lon, h}，弧度/米 */
+    vect3 std;    /*< 位置 {sigma_E, sigma_N, sigma_U}，米（局部 NEU） */
+    vect3 vn;     /*< n 系速度 (m/s)，需要时填（ipos3g 的 KF 就用它） */
+    vect3 vn_std; /*< 速度标准差 (m/s) */
+    double yaw{0.0};     /*< 双天线航向 (rad)，yaw_std<=0 表示无效 */
+    double yaw_std{0.0}; /*< 航向标准差 (rad) */
+};
+
+struct OdoMeas {
+    double time{0.0};
+    double ds{0.0}; /*< 里程增量 (m) */
+    double dt{0.0};
+};
+
+
 /* ============================================================================
- * Preintegration —— 仿 OB_GINS 的 IMU 预积分
+ * 全局标定状态（滑窗内所有帧共享同一份，不随时间变化）
+ *
+ * 参数：sodo, abv_pitch, abv_yaw, lvOD(3), yaw_gnss_offset
+ * 参数化：全部加性，无需流形
+ * 数据布局：calib[0..6] = {sodo, ap, ay, lx, ly, lz, yoff}
+ * ==========================================================================*/
+struct CalibState {
+    double sodo{0.0};             /*< 里程计刻度因子误差 */
+    double abv_pitch{0.0};        /*< 里程计安装俯仰角 (rad) */
+    double abv_yaw{0.0};          /*< 里程计安装偏航角 (rad) */
+    vect3  lvOD{0.0, 0.0, 0.0};   /*< 里程计杆臂 (b 系，m) */
+    double yaw_gnss_offset{0.0};  /*< 双天线航向偏置 (rad) */
+
+    void toData(double *d) const {
+        d[0] = sodo;
+        d[1] = abv_pitch;
+        d[2] = abv_yaw;
+        d[3] = lvOD.i;
+        d[4] = lvOD.j;
+        d[5] = lvOD.k;
+        d[6] = yaw_gnss_offset;
+    }
+    void fromData(const double *d) {
+        sodo            = d[0];
+        abv_pitch       = d[1];
+        abv_yaw         = d[2];
+        lvOD            = vect3(d[3], d[4], d[5]);
+        yaw_gnss_offset = d[6];
+    }
+};
+
+/* 一个关键帧 ----------------------------------------------------------------------*/
+struct Frame {
+    double time{0.0};
+    /* Ceres 参数块（顺序与 gopt_types.h 一致）。数组固定长度，保证地址稳定 ----*/
+    std::array<double, NUM_POSE> pose{};     /*< {pE,pN,pU, qx,qy,qz,qw} */
+    std::array<double, NUM_MIX_ODO> mix{};   /*< {v, bg, ba [, sodo]} */
+
+    /* 到下一关键帧的预积分（最后一帧为空） ----------------------------------*/
+    std::shared_ptr<Preintegration> pre_to_next;
+
+    /* 该帧上的 GNSS 位置观测（已转到局部 ENU） -------------------------------*/
+    bool has_gnss{false};
+    vect3 gnss_pos{};
+    vect3 gnss_std{1.0, 1.0, 1.0};
+    vect3 gnss_std0{1.0, 1.0, 1.0}; /*< 原始 std，重加权时以它为基准（避免累乘） */
+    double gnss_time{0.0};
+    bool   gnss_in_gap{false};      /*< 该帧落在模拟的 GNSS 中断区间（只做参考，不入因子） */
+
+    /* 该帧上的 GNSS 速度观测 ------------------------------------*/
+    bool has_gnss_vel{false};
+    vect3 gnss_vn{};
+    vect3 gnss_vn_std{1.0, 1.0, 1.0};
+
+    /* 静止段标记（由 IMU 判据得到，见 Estimator::updateStaticDetector） -------------*/
+    bool is_static{false};
+    bool has_yaw_hold{false};
+    double yaw_ref{0.0};
+
+    /* 双天线航向观测 ------------------------------------------------------------*/
+    bool has_gnss_yaw{false};
+    double gnss_yaw{0.0};
+    double gnss_yaw_std{0.0};
+
+    /* 原始双天线航向（已按天线安装方式折算到内部 yaw）。无论是否启用航向因子
+     * 都会记录，用于统计"估计航向 vs 双天线航向"的一致性。 */
+    bool   has_raw_yaw{false};
+    double raw_yaw_conv{0.0};
+
+    /* FEJ：该帧的线性化点 --------------------*/
+    bool has_lin{false};
+    std::array<double, NUM_POSE> pose_lin{};
+    std::array<double, NUM_MIX_ODO> mix_lin{};
+
+    /* 里程计速度观测（前向速度，b 系） ------------------------------------ */
+    bool   has_odo{false};
+    double odo_dS{0.0};               /*< 里程增量 (m) */
+    double odo_dt{0.0};               /*< 对应时间间隔 (s) */
+    vect3  odo_omega_meas{};          /*< 该段陀螺原始测量 (rad/s)，用于杆臂补偿 */
+    double odo_std{0.05};             /*< 里程速度标准差 (m/s) */
+};
+
+/* ============================================================================
+ * PoseManifold：pose = [p(3), qx,qy,qz,qw]，右扰动，切空间 6 维
+ * ==========================================================================*/
+class PoseManifold : public ceres::Manifold {
+public:
+    int AmbientSize() const override { return 7; }
+    int TangentSize() const override { return 6; }
+
+    bool Plus(const double *x, const double *delta, double *x_plus) const override {
+        x_plus[0] = x[0] + delta[0];
+        x_plus[1] = x[1] + delta[1];
+        x_plus[2] = x[2] + delta[2];
+
+        quat q(x[6], x[3], x[4], x[5]);
+        quat dq = rv2q(vect3(delta[3], delta[4], delta[5]));
+        quat q_new = q * dq;
+        normlize(&q_new);
+
+        x_plus[3] = q_new.q1;
+        x_plus[4] = q_new.q2;
+        x_plus[5] = q_new.q3;
+        x_plus[6] = q_new.q0;
+        return true;
+    }
+
+    bool PlusJacobian(const double *x, double *jacobian) const override {
+        Eigen::Map<Eigen::Matrix<double, 7, 6, Eigen::RowMajor>> J(jacobian);
+        J.setZero();
+        J.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity();
+
+        const double qx = x[3], qy = x[4], qz = x[5], qw = x[6];
+        /* ∂q/∂δφ = 0.5 · [ -q_v  q_w I + [q_v]× ]  转置到 [x,y,z,w] 顺序 */
+        Eigen::Matrix<double, 4, 3> dq_dphi;
+        dq_dphi << -qx, -qy, -qz,
+                    qw, -qz,  qy,
+                    qz,  qw, -qx,
+                   -qy,  qx,  qw;
+        dq_dphi *= 0.5;
+
+        /* dq_dphi 行序 [w, x, y, z]，pose 的 [x, y, z, w] */
+        J.block<1, 3>(3, 3) = dq_dphi.row(1);   // pose[3] = qx
+        J.block<1, 3>(4, 3) = dq_dphi.row(2);   // pose[4] = qy
+        J.block<1, 3>(5, 3) = dq_dphi.row(3);   // pose[5] = qz
+        J.block<1, 3>(6, 3) = dq_dphi.row(0);   // pose[6] = qw
+        return true;
+    }
+
+    bool Minus(const double *y, const double *x, double *y_minus_x) const override {
+        y_minus_x[0] = y[0] - x[0];
+        y_minus_x[1] = y[1] - x[1];
+        y_minus_x[2] = y[2] - x[2];
+
+        quat qx(x[6], x[3], x[4], x[5]);
+        quat qy(y[6], y[3], y[4], y[5]);
+        vect3 dphi = q2rv((~qx) * qy);
+        y_minus_x[3] = dphi.i;
+        y_minus_x[4] = dphi.j;
+        y_minus_x[5] = dphi.k;
+        return true;
+    }
+
+    /* ---- 新增：MinusJacobian ---- */
+    bool MinusJacobian(const double *x, double *jacobian) const override {
+        /* 形状 6×7（行主序）
+         * ∂(y ⊖ x)/∂y|_{y=x}
+         *   = [ I_3          0_{3×4} ]
+         *     [ 0_{3×3}      J_q     ]
+         * 其中 J_q 与 Ceres 内置 QuaternionManifold 保持一致 */
+        Eigen::Map<Eigen::Matrix<double, 6, 7, Eigen::RowMajor>> J(jacobian);
+        J.setZero();
+
+        /* 位置部分 */
+        J.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity();
+
+        /* 旋转部分：pose 中四元数顺序为 [qx, qy, qz, qw] */
+        const double qx = x[3], qy = x[4], qz = x[5], qw = x[6];
+
+        Eigen::Matrix<double, 3, 4> Jq;
+        Jq << -qy,  qx, -qw,  qz,
+              -qz,  qw,  qx, -qy,
+              -qw, -qz,  qy,  qx;
+        Jq *= 2.0;
+
+        J.block<3, 4>(3, 3) = Jq;
+        return true;
+    }
+};
+
+/* ============================================================================
+ * Preintegration
  * ----------------------------------------------------------------------------
  * 预积分量都在起始关键帧的 b0 系中：
  *     Δp_ij, Δv_ij (m, m/s), Δq_ij (b0 -> b_i)
@@ -748,14 +864,6 @@ public:
  * ==========================================================================*/
 class Preintegration {
 public:
-    static constexpr int STATE_DIM = NUM_STATE;  /*< 15 */
-    static constexpr int NOISE_DIM = NUM_NOISE;  /*< 12 */
-
-    using CovMatrix   = Eigen::Matrix<double, STATE_DIM, STATE_DIM>;
-    using JacMatrix   = Eigen::Matrix<double, STATE_DIM, STATE_DIM>;
-    using NoiseMatrix = Eigen::Matrix<double, NOISE_DIM, NOISE_DIM>;
-    using GainMatrix  = Eigen::Matrix<double, STATE_DIM, NOISE_DIM>;
-
     Preintegration(void);
     explicit Preintegration(const PreintegrationParam &param);
 
@@ -795,7 +903,6 @@ public:
 
 private:
     void propagate(const ImuMeas &meas);
-
     /* 构造 F、G、Q */
     CovMatrix   buildF(const Eigen::Vector3d &a_body,
                        const Eigen::Vector3d &w_body,
@@ -831,86 +938,6 @@ private:
     CovMatrix cov_ = CovMatrix::Zero();
     JacMatrix jac_ = JacMatrix::Identity();
 };
-
-/**
- * @brief 状态空间流形运算（参照 OB_GINS 的 State::operator+/operator-）
- *
- * 设计要点：
- *   1. 状态 x ∈ M = R^3 × SO(3) × R^3 × R^3 × R^3 (× R^1)
- *   2. 对旋转施加右扰动 q' = q ⊗ Exp(δφ)，扰动位于体轴系 b 系；
- *      这样 IMU 零偏、速度等切空间量的物理解释与预积分残差一致。
- *   3. 提供 plus/minus 一对互逆操作，可用于：
- *        - Ceres 自动微分的参数流形
- *        - 残差函数中的误差计算
- *        - 状态预测/更新
- *   4. 桥接现有 double* 数据布局，兼容 pose/mix 双数组约定。
- */
-/* ============================================================
- * 15 维基础流形（p, q, v, bg, ba）
- * ============================================================ */
-using DeltaN = Eigen::Matrix<double, NUM_STATE, 1>;   // 15×1
-
-/**
- * @brief 流形加法  x ⊞ δx
- *   p'  = p  + δp
- *   q'  = q  ⊗ Exp(δφ)         （右扰动）
- *   v'  = v  + δv
- *   bg' = bg + δbg
- *   ba' = ba + δba
- */
-State plus(const State &s, const DeltaN &delta);
-
-/**
- * @brief 流形减法  a ⊟ b
- *   δp  = a.p  - b.p
- *   δφ  = Log(b.q⁻¹ ⊗ a.q)     （与 plus 对偶）
- *   δv  = a.v  - b.v
- *   δbg = a.bg - b.bg
- *   δba = a.ba - b.ba
- */
-DeltaN minus(const State &a, const State &b);
-
-/** @brief 原地更新 s ← s ⊞ δx */
-void applyDelta(State &s, const DeltaN &delta);
-
-/* ============================================================
- * 16 维流形（在 15 维基础上扩展里程计比例因子 sodo）
- * ============================================================ */
-using DeltaNOdo = Eigen::Matrix<double, NUM_STATE + 1, 1>;  // 16×1
-
-State   plus(const State &s, const DeltaNOdo &delta);
-DeltaNOdo minusWithOdo(const State &a, const State &b);
-void    applyDelta(State &s, const DeltaNOdo &delta);
-
-/* ============================================================
- * 数据桥接（与 alg_lib 的 stateToData / stateFromData 等价）
- * ============================================================ */
-void  toData(const State &s, double *pose, double *mix, bool with_odometer = false);
-State fromData(const double *pose, const double *mix, bool with_odometer = false);
-
-void stateToData(const State &state, double *pose, double *mix,
-                 bool with_odometer = false);
-void stateFromData(const double *pose, const double *mix,
-                   bool with_odometer, State &state);
-/* pose = {pE, pN, pU, qx, qy, qz, qw}（与 stateToData 一致）
- * delta = {dpE, dpN, dpU, dφx, dφy, dφz}
- * 定义在 alg_lib.cpp -------------------------------------------------------- */
-void posePlus(const double *pose, const double *delta, double *pose_plus);
-
-/* y_minus_x = y ⊟ x：
- *   δp = y.p - x.p
- *   δφ = Log(x.q⁻¹ ⊗ y.q)
- * 定义在 alg_lib.cpp -------------------------------------------------------- */
-void poseMinus(const double *y, const double *x, double *y_minus_x);
-
-/* 累积法方程：H += Jᵀ J, b += Jᵀ r
- * 说明：J 的行数对应残差个数（J.row == r.rc），列数对应变量维数。
- *      H 与 b 若为空（row == 0）将按 J.clm 自动初始化。 */
-void accumulate_normal_equations(const mat &J, const vect &r, mat &H, vect &b);
-
-/* Schur 补边缘化，返回 false 表示维数非法或数值分解失败 */
-bool schur_complement(const mat &H, const vect &b, int num_marginalized,
-                      mat &J_out, vect &r_out);
 
 /* ============================================================
  * 高层封装：管理若干残差块，按帧粒度边缘化
@@ -949,112 +976,383 @@ private:
     vect r_prior_{};
 };
 
+
 /* ============================================================================
- * 滑窗图优化管理器
+ * 因子 1：IMU 预积分（15 维）
+ *
+ * 残差向量（与 NUM_STATE = 15 对应）：
+ *     r = [ δΔp ; δΔv ; δΔφ ; bg_j-bg_i ; ba_j-ba_i ]
+ * 其中 Δp/Δv/Δq 先按"当前零偏 - 线性化零偏"做一阶补偿：
+ *     Δp ← Δp + ∂Δp/∂ba·δba + ∂Δp/∂bg·δbg
+ *     Δv ← Δv + ∂Δv/∂ba·δba + ∂Δv/∂bg·δbg
+ *     Δq ← Δq ⊗ Exp(∂δφ/∂bg·δbg)
+ * 偏导直接取预积分累积的状态转移矩阵 Φ 的对应分块（Φ = ∂δx_j/∂δx_i），
+ * 与 OB_GINS 的 PreintegrationFactor 一致；没有这一步时零偏在优化里
+ * 是完全不可观的（残差对 bg/ba 的导数为 0）。
+ *
+ * whiten = true 时再乘 S = sqrt_information，S·P·Sᵀ = I（P 为预积分协方差）。
  * ==========================================================================*/
-class GraphOptimizer {
+struct PreintResidual {
+    PreintResidual(const Preintegration &p, const vect3 &g, bool whiten, bool use_bias_jac)
+        : preint_(p), g_n_(g) {
+        /* 线性化点处的零偏 */
+        bg_lin_ = p.bg().toEigen();
+        ba_lin_ = p.ba().toEigen();
+
+        /* 零偏雅可比：Φ 的分块 */
+        const Eigen::Matrix<double, 15, 15> &J = p.jac();
+        Jp_bg_ = J.block<3, 3>(0, 9);
+        Jp_ba_ = J.block<3, 3>(0, 12);
+        Jv_bg_ = J.block<3, 3>(3, 9);
+        Jv_ba_ = J.block<3, 3>(3, 12);
+        Jq_bg_ = J.block<3, 3>(6, 9);
+
+        /* 不使用零偏雅可比时 J 全零，残差等价于旧版（零偏不可观） */
+        if (!use_bias_jac) {
+            Jp_bg_.setZero(); Jp_ba_.setZero();
+            Jv_bg_.setZero(); Jv_ba_.setZero();
+            Jq_bg_.setZero();
+        }
+
+        if (whiten) {
+            const mat S = llt_sqrtinv(mat(p.cov()));
+            if (S.row == 15) {
+                S_ = S.toEigen();
+                whiten_ = true;
+            }
+        }
+    }
+
+    template <typename T>
+    bool operator()(const T *const pose_i, const T *const mix_i,
+                    const T *const pose_j, const T *const mix_j,
+                    T *residual) const {
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> p_i(pose_i);
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> p_j(pose_j);
+        Eigen::Quaternion<T> q_i(pose_i[6], pose_i[3], pose_i[4], pose_i[5]);
+        Eigen::Quaternion<T> q_j(pose_j[6], pose_j[3], pose_j[4], pose_j[5]);
+
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> v_i (mix_i);
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> v_j (mix_j);
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> bg_i(mix_i + 3);
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> bg_j(mix_j + 3);
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> ba_i(mix_i + 6);
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> ba_j(mix_j + 6);
+
+        const T dt = T(preint_.dt());
+        const Eigen::Matrix<T, 3, 1> g_n = toEig3<T>(g_n_);
+
+        /* ---- 零偏一阶补偿 ---- */
+        const Eigen::Matrix<T, 3, 1> dbg = bg_i - bg_lin_.template cast<T>();
+        const Eigen::Matrix<T, 3, 1> dba = ba_i - ba_lin_.template cast<T>();
+
+        Eigen::Matrix<T, 3, 1> dp = toEig3<T>(preint_.p());
+        Eigen::Matrix<T, 3, 1> dv = toEig3<T>(preint_.v());
+        Eigen::Quaternion<T>   dq = toEigQ<T>(preint_.q());
+
+        dp += Jp_bg_.template cast<T>() * dbg + Jp_ba_.template cast<T>() * dba;
+        dv += Jv_bg_.template cast<T>() * dbg + Jv_ba_.template cast<T>() * dba;
+
+        const Eigen::Matrix<T, 3, 1> dphi = Jq_bg_.template cast<T>() * dbg;
+        const Eigen::Quaternion<T> dq_corr(T(1.0), T(0.5) * dphi(0),
+                                           T(0.5) * dphi(1), T(0.5) * dphi(2));
+        dq = (dq * dq_corr).normalized();
+
+        const Eigen::Matrix<T, 3, 3> R_i = q_i.toRotationMatrix();
+
+        Eigen::Map<Eigen::Matrix<T, 15, 1>> r(residual);
+
+        r.template segment<3>(0) = R_i.transpose() *
+            (p_j - p_i - v_i * dt - T(0.5) * g_n * dt * dt) - dp;
+        r.template segment<3>(3) = R_i.transpose() *
+            (v_j - v_i - g_n * dt) - dv;
+
+        const Eigen::Quaternion<T> q_rel = q_i.conjugate() * q_j;
+        const Eigen::Quaternion<T> q_err = dq.conjugate() * q_rel;
+        r.template segment<3>(6) = T(2.0) * q_err.vec();
+
+        r.template segment<3>(9)  = bg_j - bg_i;
+        r.template segment<3>(12) = ba_j - ba_i;
+
+        if (whiten_) {
+            r = S_.template cast<T>() * r;
+        }
+        return true;
+    }
+
+    Preintegration preint_;
+    vect3         g_n_;
+    Eigen::Matrix<double, 3, 3> Jp_bg_{Eigen::Matrix3d::Zero()}, Jp_ba_{Eigen::Matrix3d::Zero()};
+    Eigen::Matrix<double, 3, 3> Jv_bg_{Eigen::Matrix3d::Zero()}, Jv_ba_{Eigen::Matrix3d::Zero()};
+    Eigen::Matrix<double, 3, 3> Jq_bg_{Eigen::Matrix3d::Zero()};
+    Eigen::Vector3d bg_lin_{Eigen::Vector3d::Zero()};
+    Eigen::Vector3d ba_lin_{Eigen::Vector3d::Zero()};
+    Eigen::Matrix<double, 15, 15> S_{Eigen::Matrix<double, 15, 15>::Identity()};
+    bool whiten_{false};
+};
+
+/* ============================================================================
+ * 因子 2：GNSS 位置（3 维）
+ * ==========================================================================*/
+struct GnssPosResidual {
+    GnssPosResidual(const vect3 &pos, const vect3 &std_dev)
+        : pos_(pos), std_(std_dev) {}
+
+    template <typename T>
+    bool operator()(const T *const pose, T *residual) const {
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> p(pose);
+        Eigen::Map<Eigen::Matrix<T, 3, 1>>       r(residual);
+        const Eigen::Matrix<T, 3, 1> pos = toEig3<T>(pos_);
+        const Eigen::Matrix<T, 3, 1> sd  = toEig3<T>(std_);
+        for (int i = 0; i < 3; ++i) r(i) = (p(i) - pos(i)) / sd(i);
+        return true;
+    }
+
+    vect3 pos_, std_;
+};
+
+
+/* ============================================================================
+ * 因子 3：GNSS 速度（3 维，增强版）
+ *
+ *   观测：vn（ENU，m/s）
+ *   残差：r_i = (v_i - vn_i) / sigma_i，可加 Huber
+ * ==========================================================================*/
+struct GnssVelResidual {
+    GnssVelResidual(const vect3 &vn, const vect3 &std_dev, double huber_delta = 0.0)
+        : vn_(vn), std_(std_dev), huber_delta_(huber_delta) {}
+
+    template <typename T>
+    bool operator()(const T *const mix, T *residual) const {
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> v(mix);
+        Eigen::Map<Eigen::Matrix<T, 3, 1>>       r(residual);
+        const Eigen::Matrix<T, 3, 1> vn = toEig3<T>(vn_);
+        const Eigen::Matrix<T, 3, 1> sd = toEig3<T>(std_);
+
+        for (int i = 0; i < 3; ++i) {
+            const T s = (sd(i) > T(1e-9)) ? sd(i) : T(1e-9);
+            r(i) = (v(i) - vn(i)) / s;
+        }
+
+        if (huber_delta_ > 0.0) {
+            for (int i = 0; i < 3; ++i) {
+                const T abs_r = ceres::abs(r(i));
+                if (abs_r > T(huber_delta_)) {
+                    const T sign_r = (r(i) >= T(0)) ? T(1) : T(-1);
+                    r(i) = sign_r * ceres::sqrt(
+                               T(2.0) * T(huber_delta_) * abs_r
+                               - T(huber_delta_) * T(huber_delta_));
+                }
+            }
+        }
+        return true;
+    }
+
+    vect3 vn_, std_;
+    double huber_delta_;
+};
+
+/* ============================================================================
+ * 因子 4：GNSS 航向（1 维，含航向偏置标定）
+ *
+ *   yaw_gnss（已做 ant_mode 折算，但不含 yaw_offset）
+ *   残差：r = wrap(yaw(q) + yaw_off - yaw_gnss) / sigma
+ *   yaw_off 从标定参数块 calib[6] 读取
+ * ==========================================================================*/
+/* ============================================================================
+ * 因子 4：GNSS 航向（1 维，含航向偏置标定）
+ *
+ *   观测 yaw_gnss（已做 ant_mode 折算，但不含 yaw_offset）
+ *   残差  r = wrap(yaw(q) + yaw_off - yaw_gnss) / sigma
+ *   yaw_off 从标定参数块 calib[6] 读取
+ * ==========================================================================*/
+struct GnssYawResidual {
+    GnssYawResidual(double yaw_gnss, double std_dev, double huber_delta = 0.0)
+        : yaw_gnss_(yaw_gnss),
+          std_(std_dev > 1e-9 ? std_dev : 1e-9),
+          huber_delta_(huber_delta) {}
+
+    template <typename T>
+    bool operator()(const T *const pose, const T *const calib, T *residual) const {
+        Eigen::Quaternion<T> q(pose[6], pose[3], pose[4], pose[5]);
+        Eigen::Matrix<T, 3, 3> R = q.toRotationMatrix();
+
+        const T yaw_est = ceres::atan2(-R(0, 1), R(1, 1));  /* 与 m2att 一致 */
+        const T yaw_off = calib[6];                          /* 标定量 */
+
+        const T d_raw = yaw_est + yaw_off - T(yaw_gnss_);
+        const T d     = ceres::atan2(ceres::sin(d_raw), ceres::cos(d_raw));
+
+        T r = d / T(std_);
+        if (huber_delta_ > 0.0) {
+            const T abs_r = ceres::abs(r);
+            if (abs_r > T(huber_delta_)) {
+                const T sign_r = (r >= T(0)) ? T(1) : T(-1);
+                r = sign_r * ceres::sqrt(
+                        T(2.0) * T(huber_delta_) * abs_r
+                        - T(huber_delta_) * T(huber_delta_));
+            }
+        }
+        residual[0] = r;
+        return true;
+    }
+
+    double yaw_gnss_, std_, huber_delta_;
+};
+
+/* ============================================================================
+ * 因子 5：静止零速（3 维，增强版）
+ *
+ *   观测：v = 0
+ *   残差：r_i = v_i / sigma，可加 Huber
+ * ==========================================================================*/
+struct StaticVelResidual {
+    explicit StaticVelResidual(double sigma, double huber_delta = 0.0)
+        : sigma_(sigma > 1e-9 ? sigma : 1e-9),
+          huber_delta_(huber_delta) {}
+
+    template <typename T>
+    bool operator()(const T *const mix, T *residual) const {
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> v(mix);
+        for (int i = 0; i < 3; ++i) {
+            T r = v(i) / T(sigma_);
+            if (huber_delta_ > 0.0) {
+                const T abs_r = ceres::abs(r);
+                if (abs_r > T(huber_delta_)) {
+                    const T sign_r = (r >= T(0)) ? T(1) : T(-1);
+                    r = sign_r * ceres::sqrt(
+                            T(2.0) * T(huber_delta_) * abs_r
+                            - T(huber_delta_) * T(huber_delta_));
+                }
+            }
+            residual[i] = r;
+        }
+        return true;
+    }
+
+    double sigma_;
+    double huber_delta_;
+};
+
+/* ============================================================================
+ * 因子 6：边缘化先验（r 维）
+ *   残差 = J_prior * δx - r_prior
+ *   其中 δx 由"当前帧参数 - 线性化点参数"构成，这里简化为
+ *   直接以切空间向量作为参数块（调用方需保证一致）。
+ *   实用实现通常为每个被先验覆盖的参数块单独定义 residual，
+ *   这里用动态维度版以展示接口。
+ * ==========================================================================*/
+class MarginalizationPriorFactor : public ceres::CostFunction {
 public:
-    /* 配置 -----------------------------------------------------------------*/
-    struct Options {
-        int    max_keyframes     = 10;   /*< 滑窗保留关键帧上限 */
-        int    max_iterations    = 50;
-        bool   fix_first_pose    = true; /*< gauge fix：固定第一帧 pose */
-        double static_vel_sigma  = 0.01; /*< 静止零速因子标准差 (m/s) */
-        bool   whiten_preint     = false;/*< 预积分残差按协方差白化（默认关，见 RunnerOptions） */
-        bool   bias_jac          = false;/*< 残差里用零偏一阶雅可比（默认关，见 RunnerOptions） */
-        int    min_frames_solve  = 2;    /*< 达到该帧数即开始求解（消除冷启动纯外推） */
-        /* 标定模式：true 时把标定参数块作为自由变量参与优化；
-         * false（导航模式）时固定标定参数块。 */
-        bool   calib_mode = false;
-        vect3  odo_abv{0.0, 0.0, 0.0};    /*< 安装角 [pitch, 0, yaw]，rad */
-        vect3  odo_lvOD{0.0, 0.0, 0.0};   /*< 杆臂（b 系，m） */
-    };
+    MarginalizationPriorFactor(const mat &J, const vect &r)
+        : J_(J), r_(r) {
+        set_num_residuals(J.row);
+        /* 列数 = 切空间维数（这里不含 sodo，纯 15 维）*/
+        mutable_parameter_block_sizes()->push_back(J.clm);
+    }
 
-    GraphOptimizer() = default;
-    explicit GraphOptimizer(const Options &opt) : opt_(opt) {}
+    bool Evaluate(const double *const *params,
+                  double *residuals,
+                  double **jacobians) const override {
+        const double *dx = params[0];
+        Eigen::Map<const Eigen::VectorXd> dx_e(dx, J_.clm);
+        Eigen::Map<const Eigen::MatrixXd> J_e(J_.dd, J_.row, J_.clm);
+        Eigen::Map<const Eigen::VectorXd> r_e(r_.dd, r_.rc);
+        Eigen::Map<Eigen::VectorXd>       res(residuals, J_.row);
 
-    const Options &options(void) const { return opt_; }
-    Options       &options(void) { return opt_; }
+        res = J_e * dx_e - r_e;
 
-    /* 主入口 ---------------------------------------------------------------
-     * 传入滑窗内所有关键帧，输出优化结果（原地更新 frames 的参数块）。
-     * 若滑窗超限，会自动边缘化最旧帧并把先验保留在内部。 */
-    bool optimize(std::vector<Frame> &frames, const vect3 &g_n);
-
-    /* 访问器 */
-    const mat  &J_prior(void) const { return J_prior_; }
-    const vect &r_prior(void) const { return r_prior_; }
-    bool  hasPrior(void) const { return J_prior_.row > 0; }
-    void  clearPrior(void) { J_prior_ = mat(); r_prior_ = vect(); }
-
-    void setCalibState(const CalibState &c) { c.toData(calib_data_.data()); }
-    CalibState getCalibState() const {
-        CalibState c; c.fromData(calib_data_.data()); return c;
+        if (jacobians && jacobians[0]) {
+            Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
+                                     Eigen::RowMajor>>
+                Jout(jacobians[0], J_.row, J_.clm);
+            Jout = J_e;
+        }
+        return true;
     }
 
 private:
-    /* 组装 Ceres 问题：把 frames 的所有因子加进去 */
-    void buildProblem(ceres::Problem &problem,
-                      std::vector<Frame> &frames,
-                      const vect3 &g_n);
-
-    /* 边缘化最旧帧：从 problem 中提取相关残差，Schur 补消去，
-     * 输出新的先验 (J_prior_, r_prior_)。 */
-    bool marginalizeOldestFrame(ceres::Problem &problem,
-                                std::vector<Frame> &frames,
-                                const mat  &J_prior_old,
-                                const vect  &r_prior_old);
-
-    Options opt_;
-    mat  J_prior_;   /*< 上一次边缘化的先验信息矩阵 */
-    vect r_prior_;   /*< 上一次边缘化的先验信息向量 */
-    std::array<double, NUM_CALIB> calib_data_{};
-
-public:
-    /* 求解统计（供上层评估计算量与收敛性） */
-    int    stat_solves{0};       /*< 调用 solve 的次数 */
-    int    stat_converged{0};    /*< 正常收敛的次数 */
-    int    stat_iterations{0};   /*< 迭代次数累计 */
-    double stat_time_s{0.0};     /*< 求解累计耗时 (s) */
-    std::string last_message;    /*< 最近一次求解的结束信息 */
-    
+    mat  J_;
+    vect r_;
 };
 
-struct DataSensor281_t {
-    double t;
-    double wm[3];
-    double vm[3];
-    double dS;
-    double posgps[3];
-    double flagGNSS;
-    double vngps[3];
-    double satnum;
-    double baseline;
-    double yaw;      /*< 双天线航向：rad，0~2π 回绕 */
-    double yawrms;   /*< 航向标准差：deg（>5 视为不可用，179.99 之类为无效标志） */
-    double pos610[3];
-    double att610[3];
-    double vn610[3];
-    double hoop;
-    double posstd[3];
+/* ============================================================================
+ * 因子 7：里程计速度（3 维，含刻度因子 / 安装角 / 杆臂标定）
+ *
+ *   v_odo^b = (1 + sodo) * (dS/dt) * C_b^m * e_x + omega_ib^b × l_OD
+ *   r = R_b^n * v_odo^b - v^n
+ *
+ *   标定量从 calib 块读取：
+ *     calib[0]     = sodo
+ *     calib[1]     = abv_pitch
+ *     calib[2]     = abv_yaw
+ *     calib[3..5]  = lvOD
+ *     calib[6]     = yaw_off（本因子不使用）
+ * ==========================================================================*/
+struct OdoVelResidual {
+    OdoVelResidual(double dS, double dt, const vect3 &omega_meas,
+                   double sigma, double huber_delta = 0.0)
+        : dS_(dS),
+          dt_(dt > 1e-9 ? dt : 1e-9),
+          omega_meas_(omega_meas),
+          sigma_(sigma > 1e-9 ? sigma : 1e-9),
+          huber_delta_(huber_delta) {}
+
+    template <typename T>
+    bool operator()(const T *const pose, const T *const mix,
+                    const T *const calib, T *residual) const {
+        Eigen::Quaternion<T> q(pose[6], pose[3], pose[4], pose[5]);
+        Eigen::Matrix<T, 3, 3> R_bn = q.toRotationMatrix();
+
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> v_n(mix);
+        const Eigen::Map<const Eigen::Matrix<T, 3, 1>> bg(mix + 3);
+
+        /* --- 从标定块读参数 --- */
+        const T sodo = calib[0];
+        const T ap   = calib[1];
+        const T ay   = calib[2];
+        Eigen::Matrix<T, 3, 1> l(calib[3], calib[4], calib[5]);
+
+        /* --- 安装角：C_b^m * e_x --- */
+        Eigen::Matrix<T, 3, 1> cx;
+        cx <<  ceres::cos(ay) * ceres::cos(ap),
+              -ceres::sin(ay) * ceres::cos(ap),
+              -ceres::sin(ap);
+
+        /* --- 杆臂：omega_ib^b × l_OD --- */
+        Eigen::Matrix<T, 3, 1> w(
+            T(omega_meas_.i) - bg(0),
+            T(omega_meas_.j) - bg(1),
+            T(omega_meas_.k) - bg(2));
+        Eigen::Matrix<T, 3, 1> v_lev = w.cross(l);
+
+        /* --- 里程计速度（b 系） --- */
+        Eigen::Matrix<T, 3, 1> v_odo_b =
+            (T(1.0) + sodo) * T(dS_ / dt_) * cx + v_lev;
+
+        /* --- 转 n 系并求残差 --- */
+        Eigen::Matrix<T, 3, 1> v_odo_n = R_bn * v_odo_b;
+        Eigen::Map<Eigen::Matrix<T, 3, 1>> r(residual);
+        r = (v_n - v_odo_n) / T(sigma_);
+
+        if (huber_delta_ > 0.0) {
+            for (int i = 0; i < 3; ++i) {
+                const T abs_r = ceres::abs(r(i));
+                if (abs_r > T(huber_delta_)) {
+                    const T sign_r = (r(i) >= T(0)) ? T(1) : T(-1);
+                    r(i) = sign_r * ceres::sqrt(
+                               T(2.0) * T(huber_delta_) * abs_r
+                               - T(huber_delta_) * T(huber_delta_));
+                }
+            }
+        }
+        return true;
+    }
+
+    double dS_, dt_;
+    vect3  omega_meas_;
+    double sigma_, huber_delta_;
 };
-static_assert(sizeof(DataSensor281_t) == 32 * sizeof(double),
-              "DataSensor281_t 必须严格 256 字节");
-
-/* 读取整个 bin 文件；返回成功读到的帧数 -------------------------------------- */
-size_t readSensorFile(const std::string &path,
-                      std::vector<DataSensor281_t> &out,
-                      size_t max_frames = 0);
-
-/* 有效性判据（与 main.cpp 注释一致）------------------------------------------ */
-inline bool isValidGnss(const DataSensor281_t &s) {
-    /* flagGNSS 非零且 posgps 非全零 */
-    if (s.flagGNSS == 0.0) return false;
-    if (s.posgps[0] == 0.0 && s.posgps[1] == 0.0 && s.posgps[2] == 0.0) return false;
-    if (s.posgps[0] < -PI || s.posgps[0] > PI) return false;   /* 纬度范围 */
-    return true;
-}
-
 
 struct FrameCompare {
     double time = 0.0;
@@ -1074,19 +1372,6 @@ struct FrameCompare {
     double dyaw_rad = 0.0;
     double dyaw_deg = 0.0;
 };
-
-
-/* 双天线基线安装方式（与 ipos3g 的 Ant_Mode_* 一致） */
-enum AntMode {
-    ANT_MODE_FB_B = 0,  /*< 基线前后、输出指车尾：原样 */
-    ANT_MODE_FB_F = 1,  /*< 基线前后、输出指车头：再转 180° */
-    ANT_MODE_LR_L = 2,  /*< 基线左右、输出指左侧：再转 +90° */
-    ANT_MODE_LR_R = 3,  /*< 基线左右、输出指右侧：再转 -90° */
-    ANT_MODE_ONE  = 4,  /*< 单天线，航向不可用 */
-};
-
-/* 双天线原始航向 -> 内部姿态 yaw（rad）：ant_mode 折算 + 天线安装角 */
-double gnssYaw2AttYaw(double raw_yaw, int ant_mode, double yaw_offset);
 
 struct RunnerOptions {
     double kf_dt         = 1.0;
@@ -1194,15 +1479,260 @@ struct RunnerStats {
     std::map<double, size_t>  per_kf_time_to_idx;            /* ← 新增：时间→下标 */
 };
 
-RunnerStats runRealData(const std::string &bin_path,
-                        const RunnerOptions &opt,
-                        const std::string &out_nav_path = "");
+/* ============================================================================
+ * 误差累积器：把每帧的误差按时间收集，最后统一计算统计量
+ * ==========================================================================*/
+struct ErrorAccumulator {
+    std::vector<double> err;
+    std::vector<double> time;
 
-/* 同上，但直接吃已经读进来的（可能被截断/预处理过的）数据，
- * 省掉 main 里"落盘再重读"的 68 MB 往返。 */
-RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
-                        const RunnerOptions &opt,
-                        const std::string &out_nav_path = "");
+    void add(double t, double e) {
+        time.push_back(t);
+        err.push_back(e);
+    }
+
+    int size() const { return static_cast<int>(err.size()); }
+
+    void fill(double &max_v, double &mean_v, double &rms_v,
+              double &std_v, double pct[5]) const {
+        if (err.empty()) return;
+
+        max_v  = 0.0;
+        mean_v = 0.0;
+        rms_v  = 0.0;
+        for (double e : err) {
+            max_v  = std::max(max_v, e);
+            mean_v += e;
+            rms_v  += e * e;
+        }
+        const int n = static_cast<int>(err.size());
+        mean_v /= n;
+        rms_v   = std::sqrt(rms_v / n);
+
+        double var = 0.0;
+        for (double e : err) var += (e - mean_v) * (e - mean_v);
+        std_v = std::sqrt(var / n);
+
+        std::vector<double> sorted = err;
+        std::sort(sorted.begin(), sorted.end());
+        pct[0] = sorted[std::min(n - 1, n / 2)];
+        pct[1] = sorted[std::min(n - 1, static_cast<int>(n * 0.90))];
+        pct[2] = sorted[std::min(n - 1, static_cast<int>(n * 0.95))];
+        pct[3] = sorted[std::min(n - 1, static_cast<int>(n * 0.99))];
+        pct[4] = sorted.back();
+    }
+};
+
+/* ============================================================================
+ * 滑窗图优化管理器
+ * ==========================================================================*/
+class GraphOptimizer {
+public:
+    /* 配置 -----------------------------------------------------------------*/
+    struct Options {
+        int    max_keyframes     = 10;   /*< 滑窗保留关键帧上限 */
+        int    max_iterations    = 50;
+        bool   fix_first_pose    = true; /*< gauge fix：固定第一帧 pose */
+        double static_vel_sigma  = 0.01; /*< 静止零速因子标准差 (m/s) */
+        bool   whiten_preint     = false;/*< 预积分残差按协方差白化（默认关，见 RunnerOptions） */
+        bool   bias_jac          = false;/*< 残差里用零偏一阶雅可比（默认关，见 RunnerOptions） */
+        int    min_frames_solve  = 2;    /*< 达到该帧数即开始求解（消除冷启动纯外推） */
+        /* 标定模式：true 时把标定参数块作为自由变量参与优化；
+         * false（导航模式）时固定标定参数块。 */
+        bool   calib_mode = false;
+        vect3  odo_abv{0.0, 0.0, 0.0};    /*< 安装角 [pitch, 0, yaw]，rad */
+        vect3  odo_lvOD{0.0, 0.0, 0.0};   /*< 杆臂（b 系，m） */
+    };
+
+    GraphOptimizer() = default;
+    explicit GraphOptimizer(const Options &opt) : opt_(opt) {}
+
+    const Options &options(void) const { return opt_; }
+    Options       &options(void) { return opt_; }
+
+    /* 主入口 ---------------------------------------------------------------
+     * 传入滑窗内所有关键帧，输出优化结果（原地更新 frames 的参数块）。
+     * 若滑窗超限，会自动边缘化最旧帧并把先验保留在内部。 */
+    bool optimize(std::vector<Frame> &frames, const vect3 &g_n);
+
+    /* 访问器 */
+    const mat  &J_prior(void) const { return J_prior_; }
+    const vect &r_prior(void) const { return r_prior_; }
+    bool  hasPrior(void) const { return J_prior_.row > 0; }
+    void  clearPrior(void) { J_prior_ = mat(); r_prior_ = vect(); }
+
+    void setCalibState(const CalibState &c) { c.toData(calib_data_.data()); }
+    CalibState getCalibState() const { CalibState c; c.fromData(calib_data_.data()); return c; }
+
+private:
+    /* 组装 Ceres 问题：把 frames 的所有因子加进去 */
+    void buildProblem(ceres::Problem &problem, std::vector<Frame> &frames,  const vect3 &g_n);
+
+    /* 边缘化最旧帧：从 problem 中提取相关残差，Schur 补消去，
+     * 输出新的先验 (J_prior_, r_prior_)。 */
+    bool marginalizeOldestFrame(ceres::Problem &problem, std::vector<Frame> &frames, const mat  &J_prior_old, const vect  &r_prior_old);
+
+    Options opt_;
+    mat  J_prior_;   /*< 上一次边缘化的先验信息矩阵 */
+    vect r_prior_;   /*< 上一次边缘化的先验信息向量 */
+    std::array<double, NUM_CALIB> calib_data_{};
+
+public:
+    /* 求解统计（供上层评估计算量与收敛性） */
+    int    stat_solves{0};       /*< 调用 solve 的次数 */
+    int    stat_converged{0};    /*< 正常收敛的次数 */
+    int    stat_iterations{0};   /*< 迭代次数累计 */
+    double stat_time_s{0.0};     /*< 求解累计耗时 (s) */
+    std::string last_message;    /*< 最近一次求解的结束信息 */
+    
+};
+
+
+
+/* 双天线原始航向 -> 内部姿态 yaw（rad）：ant_mode 折算 + 天线安装角 */
+double gnssYaw2AttYaw(double raw_yaw, int ant_mode, double yaw_offset);
+double range(double val, double minVal, double maxVal);
+int sign(double val, double eps = EPS);
+double atan2Ex(double y, double x);
+inline double asinEx(double x) { return std::asin(range(x, -1.0, 1.0)); }
+double norm(const double *pd, int n);
+double norm1(const double *pd, int n);
+double normInf(const double *pd, int n);
+int IsZeros(const vect3 &v, double eps = EPS);
+int IsZero(const double &val, double eps = EPS);
+uint8_t IsZerosXY(const vect3 &v, double eps = EPS);
+uint8_t IsNaN(const vect3 &v);
+double diffYaw(double yaw, double yaw0);
+vect3 abs(const vect3 &v);
+vect3 maxabs(const vect3 &v1, const vect3 &v2);
+double norm(const vect3 &v);
+double normInf(const vect3 &v);
+double normXY(const vect3 &v);
+double normXYInf(const vect3 &v);
+vect3 sqrt(const vect3 &v);
+vect3 pow(const vect3 &v, int k);
+double dot(const vect3 &v1, const vect3 &v2);
+vect3 dotmul(const vect3 &v1, const vect3 &v2);
+mat3 vxv(const vect3 &v1, const vect3 &v2);
+double sinAng(const vect3 &v1, const vect3 &v2);
+vect3 sort(const vect3 &v);
+vect3 randn(const vect3 &mu, const vect3 &sigma);
+double MKQt(double sR, double tau);
+vect3 MKQt(const vect3 &sR, const vect3 &tau);
+
+/* ============================ 融合 ============================ */
+void fusion(double *x1, double *p1, const double *x2, const double *p2, int n = 9,
+            double *xf = nullptr, double *pf = nullptr);
+void fusion(vect3 &x1, vect3 &p1, const vect3 x2, const vect3 p2);
+void fusion(vect3 &x1, vect3 &p1, const vect3 x2, const vect3 p2, vect3 &xf, vect3 &pf);
+
+
+
+/**
+ * @brief 状态空间流形运算（参照 OB_GINS 的 State::operator+/operator-）
+ *
+ *   1. 状态 x ∈ M = R^3 × SO(3) × R^3 × R^3 × R^3 (× R^1)
+ *   2. 对旋转施加右扰动 q' = q ⊗ Exp(δφ)，扰动位于体轴系 b 系；
+ *      这样 IMU 零偏、速度等切空间量的物理解释与预积分残差一致。
+ *   3. 提供 plus/minus 一对互逆操作，可用于：
+ *        - Ceres 自动微分的参数流形
+ *        - 残差函数中的误差计算
+ *        - 状态预测/更新
+ *   4. 桥接现有 double* 数据布局，兼容 pose/mix 双数组约定。
+ */
+
+/**
+ * @brief 流形加法  x ⊞ δx
+ *   p'  = p  + δp
+ *   q'  = q  ⊗ Exp(δφ)         （右扰动）
+ *   v'  = v  + δv
+ *   bg' = bg + δbg
+ *   ba' = ba + δba
+ */
+State plus(const State &s, const DeltaN &delta);
+/**
+ * @brief 流形减法  a ⊟ b
+ *   δp  = a.p  - b.p
+ *   δφ  = Log(b.q⁻¹ ⊗ a.q)     （与 plus 对偶）
+ *   δv  = a.v  - b.v
+ *   δbg = a.bg - b.bg
+ *   δba = a.ba - b.ba
+ */
+DeltaN minus(const State &a, const State &b);
+
+/** @brief 原地更新 s ← s ⊞ δx */
+void applyDelta(State &s, const DeltaN &delta);
+
+
+State   plus(const State &s, const DeltaNOdo &delta);
+DeltaNOdo minusWithOdo(const State &a, const State &b);
+void    applyDelta(State &s, const DeltaNOdo &delta);
+
+/* ============================================================
+ * 数据桥接（与 alg_lib 的 stateToData / stateFromData 等价）
+ * ============================================================ */
+void  toData(const State &s, double *pose, double *mix, bool with_odometer = false);
+State fromData(const double *pose, const double *mix, bool with_odometer = false);
+
+void stateToData(const State &state, double *pose, double *mix, bool with_odometer = false);
+void stateFromData(const double *pose, const double *mix, bool with_odometer, State &state);
+/* pose = {pE, pN, pU, qx, qy, qz, qw}（与 stateToData 一致）
+ * delta = {dpE, dpN, dpU, dφx, dφy, dφz}
+ * 定义在 alg_lib.cpp -------------------------------------------------------- */
+void posePlus(const double *pose, const double *delta, double *pose_plus);
+
+/* y_minus_x = y ⊟ x：
+ *   δp = y.p - x.p
+ *   δφ = Log(x.q⁻¹ ⊗ y.q)
+ * 定义在 alg_lib.cpp -------------------------------------------------------- */
+void poseMinus(const double *y, const double *x, double *y_minus_x);
+
+/* 累积法方程：H += Jᵀ J, b += Jᵀ r
+ * 说明：J 的行数对应残差个数（J.row == r.rc），列数对应变量维数。
+ *      H 与 b 若为空（row == 0）将按 J.clm 自动初始化。 */
+void accumulate_normal_equations(const mat &J, const vect &r, mat &H, vect &b);
+
+/* Schur 补边缘化，返回 false 表示维数非法或数值分解失败 */
+bool schur_complement(const mat &H, const vect &b, int num_marginalized, mat &J_out, vect &r_out);
+
+
+
+
+
+struct DataSensor281_t {
+    double t;
+    double wm[3];
+    double vm[3];
+    double dS;
+    double posgps[3];
+    double flagGNSS;
+    double vngps[3];
+    double satnum;
+    double baseline;
+    double yaw;      /*< 双天线航向：rad，0~2π 回绕 */
+    double yawrms;   /*< 航向标准差：deg（>5 视为不可用，179.99 之类为无效标志） */
+    double pos610[3];
+    double att610[3];
+    double vn610[3];
+    double hoop;
+    double posstd[3];
+};
+static_assert(sizeof(DataSensor281_t) == 32 * sizeof(double), "DataSensor281_t 必须严格 256 字节");
+
+/* 读取整个 bin 文件；返回成功读到的帧数 -------------------------------------- */
+size_t readSensorFile(const std::string &path, std::vector<DataSensor281_t> &out, size_t max_frames = 0);
+
+/* 有效性判据（与 main.cpp 注释一致）------------------------------------------ */
+inline bool isValidGnss(const DataSensor281_t &s) {
+    /* flagGNSS 非零且 posgps 非全零 */
+    if (s.flagGNSS == 0.0) return false;
+    if (s.posgps[0] == 0.0 && s.posgps[1] == 0.0 && s.posgps[2] == 0.0) return false;
+    if (s.posgps[0] < -PI || s.posgps[0] > PI) return false;   /* 纬度范围 */
+    return true;
+}
+
+RunnerStats runRealData(const std::string &bin_path, const RunnerOptions &opt,  const std::string &out_nav_path = "");
+RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,  const RunnerOptions &opt, const std::string &out_nav_path = "");
 
 #endif
 

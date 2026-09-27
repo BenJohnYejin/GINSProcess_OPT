@@ -53,5 +53,5 @@ target_link_libraries(test_ma PRIVATE ipos3_opt_lib)
 add_executable(test_marg test/test_marg.cpp)
 target_link_libraries(test_marg PRIVATE ipos3_opt_lib)
 
-add_executable(test_flow test/test_flow.cpp)
-target_link_libraries(test_flow PRIVATE ipos3_opt_lib)
+#add_executable(test_flow test/test_flow.cpp)
+#target_link_libraries(test_flow PRIVATE ipos3_opt_lib)

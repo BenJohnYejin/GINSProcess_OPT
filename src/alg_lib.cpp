@@ -486,7 +486,6 @@ vect operator~(const vect &v) {
 /* ============================================================================
  * mat
  * ==========================================================================*/
-
 void mat::resize(int r, int c) {
     row = r;
     clm = c;
@@ -889,7 +888,6 @@ vect3 vect3::operator*(const mat &m) const {
 /* ============================================================================
  * 标量工具
  * ==========================================================================*/
-
 double range(double val, double minVal, double maxVal) {
     if (val < minVal) {
         return minVal;
@@ -1141,10 +1139,7 @@ vect3 q2rv(const quat &q) {
     double n = std::sqrt(dq.q0*dq.q0 + dq.q1*dq.q1 + dq.q2*dq.q2 + dq.q3*dq.q3);
     if (n > 0.0) { dq.q0 /= n; dq.q1 /= n; dq.q2 /= n; dq.q3 /= n; }
     /* 规范化：让 q0 >= 0；若 q0 == 0，让首个非零虚部 >= 0 */
-    if (dq.q0 < 0.0 ||
-        (dq.q0 == 0.0 &&
-         (dq.q1 < 0.0 ||
-          (dq.q1 == 0.0 && (dq.q2 < 0.0 || (dq.q2 == 0.0 && dq.q3 < 0.0)))))) {
+    if (dq.q0 < 0.0 ||  (dq.q0 == 0.0 &&(dq.q1 < 0.0 || (dq.q1 == 0.0 && (dq.q2 < 0.0 || (dq.q2 == 0.0 && dq.q3 < 0.0)))))) {
         dq.q0 = -dq.q0; dq.q1 = -dq.q1; dq.q2 = -dq.q2; dq.q3 = -dq.q3;
     }
     double s = std::sqrt(std::max(0.0, 1.0 - dq.q0 * dq.q0));
@@ -1965,10 +1960,6 @@ vect3 earth::vn2dpos(const vect3 &vn0, float ts) const {
 /* ============================================================================
  * Preintegration 实现
  * ==========================================================================*/
-/* ============================================================================
- * Preintegration 实现（优化版，参照 OB_GINS 中值积分 + 高斯-马尔可夫零偏模型）
- * ==========================================================================*/
-
 Preintegration::Preintegration(void) { reset(); }
 
 Preintegration::Preintegration(const PreintegrationParam &param) {
@@ -2097,7 +2088,6 @@ void Preintegration::propagate(const ImuMeas &meas) {
     p_ = p_ + v_old * dt + vect3(a_b0 * (0.5 * dt * dt));
     v_ = v_old + vect3(a_b0 * dt);
 
-    /* 姿态更新（只做一次） */
     q_ = q_prev * dq_step;
     q_.normlize(&q_);
 
@@ -2110,7 +2100,6 @@ void Preintegration::propagate(const ImuMeas &meas) {
     cov_ = F * cov_ * F.transpose() + G * Q * G.transpose();
     jac_ = F * jac_;
 
-    /* 里程计预积分（可选） */
     if (meas.odovel != 0.0) {
         /* 安装角 C_b^m * e_x。abv = [pitch, 0, yaw] */
         const double ap = param_.abv.i;   /* pitch */
@@ -2125,8 +2114,7 @@ void Preintegration::propagate(const ImuMeas &meas) {
 
         /* 杆臂补偿：omega_ib^b × l_OD；dtheta_e 是已经去偏后的角增量 */
         const Eigen::Vector3d w_body_b = dtheta_e / dt;
-        const Eigen::Vector3d v_lev =
-            w_body_b.cross(param_.lvOD.toEigen());
+        const Eigen::Vector3d v_lev =  w_body_b.cross(param_.lvOD.toEigen());
 
         const Eigen::Vector3d ds_body = ds_scaled * cx + v_lev * dt;
         s_ = s_ + vect3(R_mid * ds_body);
@@ -2147,7 +2135,7 @@ void Preintegration::propagate(const ImuMeas &meas) {
  *   误差状态：δx = [δp, δv, δφ, δbg, δba]
  *   R 为区间起点的旋转（用于把体轴系加速度/角速度旋到 b0 系）
  * -------------------------------------------------------------------------- */
-Preintegration::CovMatrix Preintegration::buildF(const Eigen::Vector3d &a_body,
+CovMatrix Preintegration::buildF(const Eigen::Vector3d &a_body,
                                                  const Eigen::Vector3d &w_body,
                                                  const Eigen::Matrix3d &R,
                                                  double dt) const {
@@ -2179,7 +2167,7 @@ Preintegration::CovMatrix Preintegration::buildF(const Eigen::Vector3d &a_body,
     return F;
 }
 
-Preintegration::GainMatrix Preintegration::buildG(const Eigen::Matrix3d &R) const {
+GainMatrix Preintegration::buildG(const Eigen::Matrix3d &R) const {
     GainMatrix G = GainMatrix::Zero();
     G.block<3, 3>(3, 3)  = -R;                            /* δv  ← na  */
     G.block<3, 3>(6, 0)  = -Eigen::Matrix3d::Identity();  /* δφ  ← ng  */
@@ -2195,7 +2183,7 @@ Preintegration::GainMatrix Preintegration::buildG(const Eigen::Matrix3d &R) cons
  *   σg, σa 分别来自 ARW / VRW；
  *   σbg, σba 是零偏稳态标准差；τ = corr_time。
  * -------------------------------------------------------------------------- */
-Preintegration::NoiseMatrix Preintegration::buildQ(double dt) const {
+NoiseMatrix Preintegration::buildQ(double dt) const {
     NoiseMatrix Q = NoiseMatrix::Zero();
 
     const double gyr_psd = param_.gyr_arw * param_.gyr_arw;
@@ -2260,7 +2248,6 @@ void applyDelta(State &s, const DeltaN &delta) {
 /* ============================================================
  * 16 维（带里程计比例因子 sodo）
  * ============================================================ */
-
 State plus(const State &s, const DeltaNOdo &delta) {
     State r = s;
 
@@ -2297,7 +2284,6 @@ void applyDelta(State &s, const DeltaNOdo &delta) {
 /* ============================================================
  * 数据桥接
  * ============================================================ */
-
 void toData(const State &s, double *pose, double *mix, bool with_odometer) {
     /* pose = {pE, pN, pU, qx, qy, qz, qw} */
     pose[0] = s.p.i;
@@ -2524,482 +2510,7 @@ bool MarginalizationInfo::marginalize(int num_marginalized) {
     n_ = H_.row;
     return true;
 }
-/* ============================================================================
- * PoseManifold：pose = [p(3), qx,qy,qz,qw]，右扰动，切空间 6 维
- * ==========================================================================*/
-class PoseManifold : public ceres::Manifold {
-public:
-    int AmbientSize() const override { return 7; }
-    int TangentSize() const override { return 6; }
 
-    bool Plus(const double *x, const double *delta, double *x_plus) const override {
-        x_plus[0] = x[0] + delta[0];
-        x_plus[1] = x[1] + delta[1];
-        x_plus[2] = x[2] + delta[2];
-
-        quat q(x[6], x[3], x[4], x[5]);
-        quat dq = rv2q(vect3(delta[3], delta[4], delta[5]));
-        quat q_new = q * dq;
-        normlize(&q_new);
-
-        x_plus[3] = q_new.q1;
-        x_plus[4] = q_new.q2;
-        x_plus[5] = q_new.q3;
-        x_plus[6] = q_new.q0;
-        return true;
-    }
-
-    bool PlusJacobian(const double *x, double *jacobian) const override {
-        Eigen::Map<Eigen::Matrix<double, 7, 6, Eigen::RowMajor>> J(jacobian);
-        J.setZero();
-        J.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity();
-
-        const double qx = x[3], qy = x[4], qz = x[5], qw = x[6];
-        /* ∂q/∂δφ = 0.5 · [ -q_v  q_w I + [q_v]× ]  转置到 [x,y,z,w] 顺序 */
-        Eigen::Matrix<double, 4, 3> dq_dphi;
-        dq_dphi << -qx, -qy, -qz,
-                    qw, -qz,  qy,
-                    qz,  qw, -qx,
-                   -qy,  qx,  qw;
-        dq_dphi *= 0.5;
-
-        /* dq_dphi 行序 [w, x, y, z]，pose 的 [x, y, z, w] */
-        J.block<1, 3>(3, 3) = dq_dphi.row(1);   // pose[3] = qx
-        J.block<1, 3>(4, 3) = dq_dphi.row(2);   // pose[4] = qy
-        J.block<1, 3>(5, 3) = dq_dphi.row(3);   // pose[5] = qz
-        J.block<1, 3>(6, 3) = dq_dphi.row(0);   // pose[6] = qw
-        return true;
-    }
-
-    bool Minus(const double *y, const double *x, double *y_minus_x) const override {
-        y_minus_x[0] = y[0] - x[0];
-        y_minus_x[1] = y[1] - x[1];
-        y_minus_x[2] = y[2] - x[2];
-
-        quat qx(x[6], x[3], x[4], x[5]);
-        quat qy(y[6], y[3], y[4], y[5]);
-        vect3 dphi = q2rv((~qx) * qy);
-        y_minus_x[3] = dphi.i;
-        y_minus_x[4] = dphi.j;
-        y_minus_x[5] = dphi.k;
-        return true;
-    }
-
-    /* ---- 新增：MinusJacobian ---- */
-    bool MinusJacobian(const double *x, double *jacobian) const override {
-        /* 形状 6×7（行主序）
-         * ∂(y ⊖ x)/∂y|_{y=x}
-         *   = [ I_3          0_{3×4} ]
-         *     [ 0_{3×3}      J_q     ]
-         * 其中 J_q 与 Ceres 内置 QuaternionManifold 保持一致 */
-        Eigen::Map<Eigen::Matrix<double, 6, 7, Eigen::RowMajor>> J(jacobian);
-        J.setZero();
-
-        /* 位置部分 */
-        J.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity();
-
-        /* 旋转部分：pose 中四元数顺序为 [qx, qy, qz, qw] */
-        const double qx = x[3], qy = x[4], qz = x[5], qw = x[6];
-
-        Eigen::Matrix<double, 3, 4> Jq;
-        Jq << -qy,  qx, -qw,  qz,
-              -qz,  qw,  qx, -qy,
-              -qw, -qz,  qy,  qx;
-        Jq *= 2.0;
-
-        J.block<3, 4>(3, 3) = Jq;
-        return true;
-    }
-};
-
-/* ============================================================================
- * 辅助：vect3 → Eigen 类型（支持 AutoDiff 的 Jet<T>）
- * ==========================================================================*/
-template <typename T>
-inline Eigen::Matrix<T, 3, 1> toEig3(const vect3 &v) {
-    return Eigen::Matrix<T, 3, 1>(T(v.i), T(v.j), T(v.k));
-}
-template <typename T>
-inline Eigen::Quaternion<T> toEigQ(const quat &q) {
-    return Eigen::Quaternion<T>(T(q.q0), T(q.q1), T(q.q2), T(q.q3));
-}
-
-/* ============================================================================
- * 因子 1：IMU 预积分（15 维）
- *
- * 残差向量（与 NUM_STATE = 15 对应）：
- *     r = [ δΔp ; δΔv ; δΔφ ; bg_j-bg_i ; ba_j-ba_i ]
- * 其中 Δp/Δv/Δq 先按"当前零偏 - 线性化零偏"做一阶补偿：
- *     Δp ← Δp + ∂Δp/∂ba·δba + ∂Δp/∂bg·δbg
- *     Δv ← Δv + ∂Δv/∂ba·δba + ∂Δv/∂bg·δbg
- *     Δq ← Δq ⊗ Exp(∂δφ/∂bg·δbg)
- * 偏导直接取预积分累积的状态转移矩阵 Φ 的对应分块（Φ = ∂δx_j/∂δx_i），
- * 与 OB_GINS 的 PreintegrationFactor 一致；没有这一步时零偏在优化里
- * 是完全不可观的（残差对 bg/ba 的导数为 0）。
- *
- * whiten = true 时再乘 S = sqrt_information，S·P·Sᵀ = I（P 为预积分协方差）。
- * ==========================================================================*/
-struct PreintResidual {
-    PreintResidual(const Preintegration &p, const vect3 &g, bool whiten, bool use_bias_jac)
-        : preint_(p), g_n_(g) {
-        /* 线性化点处的零偏 */
-        bg_lin_ = p.bg().toEigen();
-        ba_lin_ = p.ba().toEigen();
-
-        /* 零偏雅可比：Φ 的分块 */
-        const Eigen::Matrix<double, 15, 15> &J = p.jac();
-        Jp_bg_ = J.block<3, 3>(0, 9);
-        Jp_ba_ = J.block<3, 3>(0, 12);
-        Jv_bg_ = J.block<3, 3>(3, 9);
-        Jv_ba_ = J.block<3, 3>(3, 12);
-        Jq_bg_ = J.block<3, 3>(6, 9);
-
-        /* 不使用零偏雅可比时 J 全零，残差等价于旧版（零偏不可观） */
-        if (!use_bias_jac) {
-            Jp_bg_.setZero(); Jp_ba_.setZero();
-            Jv_bg_.setZero(); Jv_ba_.setZero();
-            Jq_bg_.setZero();
-        }
-
-        if (whiten) {
-            const mat S = llt_sqrtinv(mat(p.cov()));
-            if (S.row == 15) {
-                S_ = S.toEigen();
-                whiten_ = true;
-            }
-        }
-    }
-
-    template <typename T>
-    bool operator()(const T *const pose_i, const T *const mix_i,
-                    const T *const pose_j, const T *const mix_j,
-                    T *residual) const {
-        Eigen::Map<const Eigen::Matrix<T, 3, 1>> p_i(pose_i);
-        Eigen::Map<const Eigen::Matrix<T, 3, 1>> p_j(pose_j);
-        Eigen::Quaternion<T> q_i(pose_i[6], pose_i[3], pose_i[4], pose_i[5]);
-        Eigen::Quaternion<T> q_j(pose_j[6], pose_j[3], pose_j[4], pose_j[5]);
-
-        Eigen::Map<const Eigen::Matrix<T, 3, 1>> v_i (mix_i);
-        Eigen::Map<const Eigen::Matrix<T, 3, 1>> v_j (mix_j);
-        Eigen::Map<const Eigen::Matrix<T, 3, 1>> bg_i(mix_i + 3);
-        Eigen::Map<const Eigen::Matrix<T, 3, 1>> bg_j(mix_j + 3);
-        Eigen::Map<const Eigen::Matrix<T, 3, 1>> ba_i(mix_i + 6);
-        Eigen::Map<const Eigen::Matrix<T, 3, 1>> ba_j(mix_j + 6);
-
-        const T dt = T(preint_.dt());
-        const Eigen::Matrix<T, 3, 1> g_n = toEig3<T>(g_n_);
-
-        /* ---- 零偏一阶补偿 ---- */
-        const Eigen::Matrix<T, 3, 1> dbg = bg_i - bg_lin_.template cast<T>();
-        const Eigen::Matrix<T, 3, 1> dba = ba_i - ba_lin_.template cast<T>();
-
-        Eigen::Matrix<T, 3, 1> dp = toEig3<T>(preint_.p());
-        Eigen::Matrix<T, 3, 1> dv = toEig3<T>(preint_.v());
-        Eigen::Quaternion<T>   dq = toEigQ<T>(preint_.q());
-
-        dp += Jp_bg_.template cast<T>() * dbg + Jp_ba_.template cast<T>() * dba;
-        dv += Jv_bg_.template cast<T>() * dbg + Jv_ba_.template cast<T>() * dba;
-
-        const Eigen::Matrix<T, 3, 1> dphi = Jq_bg_.template cast<T>() * dbg;
-        const Eigen::Quaternion<T> dq_corr(T(1.0), T(0.5) * dphi(0),
-                                           T(0.5) * dphi(1), T(0.5) * dphi(2));
-        dq = (dq * dq_corr).normalized();
-
-        const Eigen::Matrix<T, 3, 3> R_i = q_i.toRotationMatrix();
-
-        Eigen::Map<Eigen::Matrix<T, 15, 1>> r(residual);
-
-        r.template segment<3>(0) = R_i.transpose() *
-            (p_j - p_i - v_i * dt - T(0.5) * g_n * dt * dt) - dp;
-        r.template segment<3>(3) = R_i.transpose() *
-            (v_j - v_i - g_n * dt) - dv;
-
-        const Eigen::Quaternion<T> q_rel = q_i.conjugate() * q_j;
-        const Eigen::Quaternion<T> q_err = dq.conjugate() * q_rel;
-        r.template segment<3>(6) = T(2.0) * q_err.vec();
-
-        r.template segment<3>(9)  = bg_j - bg_i;
-        r.template segment<3>(12) = ba_j - ba_i;
-
-        if (whiten_) {
-            r = S_.template cast<T>() * r;
-        }
-        return true;
-    }
-
-    Preintegration preint_;
-    vect3         g_n_;
-    Eigen::Matrix<double, 3, 3> Jp_bg_{Eigen::Matrix3d::Zero()}, Jp_ba_{Eigen::Matrix3d::Zero()};
-    Eigen::Matrix<double, 3, 3> Jv_bg_{Eigen::Matrix3d::Zero()}, Jv_ba_{Eigen::Matrix3d::Zero()};
-    Eigen::Matrix<double, 3, 3> Jq_bg_{Eigen::Matrix3d::Zero()};
-    Eigen::Vector3d bg_lin_{Eigen::Vector3d::Zero()};
-    Eigen::Vector3d ba_lin_{Eigen::Vector3d::Zero()};
-    Eigen::Matrix<double, 15, 15> S_{Eigen::Matrix<double, 15, 15>::Identity()};
-    bool whiten_{false};
-};
-
-/* ============================================================================
- * 因子 2：GNSS 位置（3 维）
- * ==========================================================================*/
-struct GnssPosResidual {
-    GnssPosResidual(const vect3 &pos, const vect3 &std_dev)
-        : pos_(pos), std_(std_dev) {}
-
-    template <typename T>
-    bool operator()(const T *const pose, T *residual) const {
-        Eigen::Map<const Eigen::Matrix<T, 3, 1>> p(pose);
-        Eigen::Map<Eigen::Matrix<T, 3, 1>>       r(residual);
-        const Eigen::Matrix<T, 3, 1> pos = toEig3<T>(pos_);
-        const Eigen::Matrix<T, 3, 1> sd  = toEig3<T>(std_);
-        for (int i = 0; i < 3; ++i) r(i) = (p(i) - pos(i)) / sd(i);
-        return true;
-    }
-
-    vect3 pos_, std_;
-};
-
-
-/* ============================================================================
- * 因子 3：GNSS 速度（3 维，增强版）
- *
- *   观测：vn（ENU，m/s）
- *   残差：r_i = (v_i - vn_i) / sigma_i，可加 Huber
- * ==========================================================================*/
-struct GnssVelResidual {
-    GnssVelResidual(const vect3 &vn, const vect3 &std_dev, double huber_delta = 0.0)
-        : vn_(vn), std_(std_dev), huber_delta_(huber_delta) {}
-
-    template <typename T>
-    bool operator()(const T *const mix, T *residual) const {
-        Eigen::Map<const Eigen::Matrix<T, 3, 1>> v(mix);
-        Eigen::Map<Eigen::Matrix<T, 3, 1>>       r(residual);
-        const Eigen::Matrix<T, 3, 1> vn = toEig3<T>(vn_);
-        const Eigen::Matrix<T, 3, 1> sd = toEig3<T>(std_);
-
-        for (int i = 0; i < 3; ++i) {
-            const T s = (sd(i) > T(1e-9)) ? sd(i) : T(1e-9);
-            r(i) = (v(i) - vn(i)) / s;
-        }
-
-        if (huber_delta_ > 0.0) {
-            for (int i = 0; i < 3; ++i) {
-                const T abs_r = ceres::abs(r(i));
-                if (abs_r > T(huber_delta_)) {
-                    const T sign_r = (r(i) >= T(0)) ? T(1) : T(-1);
-                    r(i) = sign_r * ceres::sqrt(
-                               T(2.0) * T(huber_delta_) * abs_r
-                               - T(huber_delta_) * T(huber_delta_));
-                }
-            }
-        }
-        return true;
-    }
-
-    vect3 vn_, std_;
-    double huber_delta_;
-};
-
-/* ============================================================================
- * 因子 4：GNSS 航向（1 维，含航向偏置标定）
- *
- *   yaw_gnss（已做 ant_mode 折算，但不含 yaw_offset）
- *   残差：r = wrap(yaw(q) + yaw_off - yaw_gnss) / sigma
- *   yaw_off 从标定参数块 calib[6] 读取
- * ==========================================================================*/
-/* ============================================================================
- * 因子 4：GNSS 航向（1 维，含航向偏置标定）
- *
- *   观测 yaw_gnss（已做 ant_mode 折算，但不含 yaw_offset）
- *   残差  r = wrap(yaw(q) + yaw_off - yaw_gnss) / sigma
- *   yaw_off 从标定参数块 calib[6] 读取
- * ==========================================================================*/
-struct GnssYawResidual {
-    GnssYawResidual(double yaw_gnss, double std_dev, double huber_delta = 0.0)
-        : yaw_gnss_(yaw_gnss),
-          std_(std_dev > 1e-9 ? std_dev : 1e-9),
-          huber_delta_(huber_delta) {}
-
-    template <typename T>
-    bool operator()(const T *const pose, const T *const calib, T *residual) const {
-        Eigen::Quaternion<T> q(pose[6], pose[3], pose[4], pose[5]);
-        Eigen::Matrix<T, 3, 3> R = q.toRotationMatrix();
-
-        const T yaw_est = ceres::atan2(-R(0, 1), R(1, 1));  /* 与 m2att 一致 */
-        const T yaw_off = calib[6];                          /* 标定量 */
-
-        const T d_raw = yaw_est + yaw_off - T(yaw_gnss_);
-        const T d     = ceres::atan2(ceres::sin(d_raw), ceres::cos(d_raw));
-
-        T r = d / T(std_);
-        if (huber_delta_ > 0.0) {
-            const T abs_r = ceres::abs(r);
-            if (abs_r > T(huber_delta_)) {
-                const T sign_r = (r >= T(0)) ? T(1) : T(-1);
-                r = sign_r * ceres::sqrt(
-                        T(2.0) * T(huber_delta_) * abs_r
-                        - T(huber_delta_) * T(huber_delta_));
-            }
-        }
-        residual[0] = r;
-        return true;
-    }
-
-    double yaw_gnss_, std_, huber_delta_;
-};
-
-/* ============================================================================
- * 因子 5：静止零速（3 维，增强版）
- *
- *   观测：v = 0
- *   残差：r_i = v_i / sigma，可加 Huber
- * ==========================================================================*/
-struct StaticVelResidual {
-    explicit StaticVelResidual(double sigma, double huber_delta = 0.0)
-        : sigma_(sigma > 1e-9 ? sigma : 1e-9),
-          huber_delta_(huber_delta) {}
-
-    template <typename T>
-    bool operator()(const T *const mix, T *residual) const {
-        Eigen::Map<const Eigen::Matrix<T, 3, 1>> v(mix);
-        for (int i = 0; i < 3; ++i) {
-            T r = v(i) / T(sigma_);
-            if (huber_delta_ > 0.0) {
-                const T abs_r = ceres::abs(r);
-                if (abs_r > T(huber_delta_)) {
-                    const T sign_r = (r >= T(0)) ? T(1) : T(-1);
-                    r = sign_r * ceres::sqrt(
-                            T(2.0) * T(huber_delta_) * abs_r
-                            - T(huber_delta_) * T(huber_delta_));
-                }
-            }
-            residual[i] = r;
-        }
-        return true;
-    }
-
-    double sigma_;
-    double huber_delta_;
-};
-
-/* ============================================================================
- * 因子 6：边缘化先验（r 维）
- *   残差 = J_prior * δx - r_prior
- *   其中 δx 由"当前帧参数 - 线性化点参数"构成，这里简化为
- *   直接以切空间向量作为参数块（调用方需保证一致）。
- *   实用实现通常为每个被先验覆盖的参数块单独定义 residual，
- *   这里用动态维度版以展示接口。
- * ==========================================================================*/
-class MarginalizationPriorFactor : public ceres::CostFunction {
-public:
-    MarginalizationPriorFactor(const mat &J, const vect &r)
-        : J_(J), r_(r) {
-        set_num_residuals(J.row);
-        /* 列数 = 切空间维数（这里不含 sodo，纯 15 维）*/
-        mutable_parameter_block_sizes()->push_back(J.clm);
-    }
-
-    bool Evaluate(const double *const *params,
-                  double *residuals,
-                  double **jacobians) const override {
-        const double *dx = params[0];
-        Eigen::Map<const Eigen::VectorXd> dx_e(dx, J_.clm);
-        Eigen::Map<const Eigen::MatrixXd> J_e(J_.dd, J_.row, J_.clm);
-        Eigen::Map<const Eigen::VectorXd> r_e(r_.dd, r_.rc);
-        Eigen::Map<Eigen::VectorXd>       res(residuals, J_.row);
-
-        res = J_e * dx_e - r_e;
-
-        if (jacobians && jacobians[0]) {
-            Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
-                                     Eigen::RowMajor>>
-                Jout(jacobians[0], J_.row, J_.clm);
-            Jout = J_e;
-        }
-        return true;
-    }
-
-private:
-    mat  J_;
-    vect r_;
-};
-
-/* ============================================================================
- * 因子 7：里程计速度（3 维，含刻度因子 / 安装角 / 杆臂标定）
- *
- *   v_odo^b = (1 + sodo) * (dS/dt) * C_b^m * e_x + omega_ib^b × l_OD
- *   r = R_b^n * v_odo^b - v^n
- *
- *   标定量从 calib 块读取：
- *     calib[0]     = sodo
- *     calib[1]     = abv_pitch
- *     calib[2]     = abv_yaw
- *     calib[3..5]  = lvOD
- *     calib[6]     = yaw_off（本因子不使用）
- * ==========================================================================*/
-struct OdoVelResidual {
-    OdoVelResidual(double dS, double dt, const vect3 &omega_meas,
-                   double sigma, double huber_delta = 0.0)
-        : dS_(dS),
-          dt_(dt > 1e-9 ? dt : 1e-9),
-          omega_meas_(omega_meas),
-          sigma_(sigma > 1e-9 ? sigma : 1e-9),
-          huber_delta_(huber_delta) {}
-
-    template <typename T>
-    bool operator()(const T *const pose, const T *const mix,
-                    const T *const calib, T *residual) const {
-        Eigen::Quaternion<T> q(pose[6], pose[3], pose[4], pose[5]);
-        Eigen::Matrix<T, 3, 3> R_bn = q.toRotationMatrix();
-
-        Eigen::Map<const Eigen::Matrix<T, 3, 1>> v_n(mix);
-        const Eigen::Map<const Eigen::Matrix<T, 3, 1>> bg(mix + 3);
-
-        /* --- 从标定块读参数 --- */
-        const T sodo = calib[0];
-        const T ap   = calib[1];
-        const T ay   = calib[2];
-        Eigen::Matrix<T, 3, 1> l(calib[3], calib[4], calib[5]);
-
-        /* --- 安装角：C_b^m * e_x --- */
-        Eigen::Matrix<T, 3, 1> cx;
-        cx <<  ceres::cos(ay) * ceres::cos(ap),
-              -ceres::sin(ay) * ceres::cos(ap),
-              -ceres::sin(ap);
-
-        /* --- 杆臂：omega_ib^b × l_OD --- */
-        Eigen::Matrix<T, 3, 1> w(
-            T(omega_meas_.i) - bg(0),
-            T(omega_meas_.j) - bg(1),
-            T(omega_meas_.k) - bg(2));
-        Eigen::Matrix<T, 3, 1> v_lev = w.cross(l);
-
-        /* --- 里程计速度（b 系） --- */
-        Eigen::Matrix<T, 3, 1> v_odo_b =
-            (T(1.0) + sodo) * T(dS_ / dt_) * cx + v_lev;
-
-        /* --- 转 n 系并求残差 --- */
-        Eigen::Matrix<T, 3, 1> v_odo_n = R_bn * v_odo_b;
-        Eigen::Map<Eigen::Matrix<T, 3, 1>> r(residual);
-        r = (v_n - v_odo_n) / T(sigma_);
-
-        if (huber_delta_ > 0.0) {
-            for (int i = 0; i < 3; ++i) {
-                const T abs_r = ceres::abs(r(i));
-                if (abs_r > T(huber_delta_)) {
-                    const T sign_r = (r(i) >= T(0)) ? T(1) : T(-1);
-                    r(i) = sign_r * ceres::sqrt(
-                               T(2.0) * T(huber_delta_) * abs_r
-                               - T(huber_delta_) * T(huber_delta_));
-                }
-            }
-        }
-        return true;
-    }
-
-    double dS_, dt_;
-    vect3  omega_meas_;
-    double sigma_, huber_delta_;
-};
 
 /* ============================================================================
  * GraphOptimizer::buildProblem
@@ -3205,49 +2716,7 @@ bool GraphOptimizer::optimize(std::vector<Frame> &frames, const vect3 &g_n) {
     return summary.termination_type == ceres::CONVERGENCE;
 }
 
-/* ============================================================================
- * 误差累积器：把每帧的误差按时间收集，最后统一计算统计量
- * ==========================================================================*/
-struct ErrorAccumulator {
-    std::vector<double> err;
-    std::vector<double> time;
 
-    void add(double t, double e) {
-        time.push_back(t);
-        err.push_back(e);
-    }
-
-    int size() const { return static_cast<int>(err.size()); }
-
-    void fill(double &max_v, double &mean_v, double &rms_v,
-              double &std_v, double pct[5]) const {
-        if (err.empty()) return;
-
-        max_v  = 0.0;
-        mean_v = 0.0;
-        rms_v  = 0.0;
-        for (double e : err) {
-            max_v  = std::max(max_v, e);
-            mean_v += e;
-            rms_v  += e * e;
-        }
-        const int n = static_cast<int>(err.size());
-        mean_v /= n;
-        rms_v   = std::sqrt(rms_v / n);
-
-        double var = 0.0;
-        for (double e : err) var += (e - mean_v) * (e - mean_v);
-        std_v = std::sqrt(var / n);
-
-        std::vector<double> sorted = err;
-        std::sort(sorted.begin(), sorted.end());
-        pct[0] = sorted[std::min(n - 1, n / 2)];
-        pct[1] = sorted[std::min(n - 1, static_cast<int>(n * 0.90))];
-        pct[2] = sorted[std::min(n - 1, static_cast<int>(n * 0.95))];
-        pct[3] = sorted[std::min(n - 1, static_cast<int>(n * 0.99))];
-        pct[4] = sorted.back();
-    }
-};
 
 size_t readSensorFile(const std::string &path,
                       std::vector<DataSensor281_t> &out,

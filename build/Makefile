@@ -56,17 +56,6 @@ CMAKE_BINARY_DIR = /mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT/build
 #=============================================================================
 # Targets provided globally by CMake.
 
-# Special rule for the target edit_cache
-edit_cache:
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "No interactive CMake dialog available..."
-	/usr/bin/cmake -E echo No\ interactive\ CMake\ dialog\ available.
-.PHONY : edit_cache
-
-# Special rule for the target edit_cache
-edit_cache/fast: edit_cache
-
-.PHONY : edit_cache/fast
-
 # Special rule for the target rebuild_cache
 rebuild_cache:
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Running CMake to regenerate build system..."
@@ -77,6 +66,17 @@ rebuild_cache:
 rebuild_cache/fast: rebuild_cache
 
 .PHONY : rebuild_cache/fast
+
+# Special rule for the target edit_cache
+edit_cache:
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "No interactive CMake dialog available..."
+	/usr/bin/cmake -E echo No\ interactive\ CMake\ dialog\ available.
+.PHONY : edit_cache
+
+# Special rule for the target edit_cache
+edit_cache/fast: edit_cache
+
+.PHONY : edit_cache/fast
 
 # The main all target
 all: cmake_check_build_system
@@ -109,19 +109,6 @@ preinstall/fast:
 depend:
 	$(CMAKE_COMMAND) -S$(CMAKE_SOURCE_DIR) -B$(CMAKE_BINARY_DIR) --check-build-system CMakeFiles/Makefile.cmake 1
 .PHONY : depend
-
-#=============================================================================
-# Target rules for targets named test_flow
-
-# Build rule for target.
-test_flow: cmake_check_build_system
-	$(MAKE) -f CMakeFiles/Makefile2 test_flow
-.PHONY : test_flow
-
-# fast build rule for target.
-test_flow/fast:
-	$(MAKE) -f CMakeFiles/test_flow.dir/build.make CMakeFiles/test_flow.dir/build
-.PHONY : test_flow/fast
 
 #=============================================================================
 # Target rules for targets named test_marg
@@ -255,33 +242,6 @@ src/main.cpp.s:
 	$(MAKE) -f CMakeFiles/ipos3_opt.dir/build.make CMakeFiles/ipos3_opt.dir/src/main.cpp.s
 .PHONY : src/main.cpp.s
 
-test/test_flow.o: test/test_flow.cpp.o
-
-.PHONY : test/test_flow.o
-
-# target to build an object file
-test/test_flow.cpp.o:
-	$(MAKE) -f CMakeFiles/test_flow.dir/build.make CMakeFiles/test_flow.dir/test/test_flow.cpp.o
-.PHONY : test/test_flow.cpp.o
-
-test/test_flow.i: test/test_flow.cpp.i
-
-.PHONY : test/test_flow.i
-
-# target to preprocess a source file
-test/test_flow.cpp.i:
-	$(MAKE) -f CMakeFiles/test_flow.dir/build.make CMakeFiles/test_flow.dir/test/test_flow.cpp.i
-.PHONY : test/test_flow.cpp.i
-
-test/test_flow.s: test/test_flow.cpp.s
-
-.PHONY : test/test_flow.s
-
-# target to generate assembly for a file
-test/test_flow.cpp.s:
-	$(MAKE) -f CMakeFiles/test_flow.dir/build.make CMakeFiles/test_flow.dir/test/test_flow.cpp.s
-.PHONY : test/test_flow.cpp.s
-
 test/test_ma.o: test/test_ma.cpp.o
 
 .PHONY : test/test_ma.o
@@ -396,9 +356,8 @@ help:
 	@echo "... all (the default if no target is provided)"
 	@echo "... clean"
 	@echo "... depend"
-	@echo "... edit_cache"
 	@echo "... rebuild_cache"
-	@echo "... test_flow"
+	@echo "... edit_cache"
 	@echo "... test_marg"
 	@echo "... test_ma"
 	@echo "... test_pre"
@@ -411,9 +370,6 @@ help:
 	@echo "... src/main.o"
 	@echo "... src/main.i"
 	@echo "... src/main.s"
-	@echo "... test/test_flow.o"
-	@echo "... test/test_flow.i"
-	@echo "... test/test_flow.s"
 	@echo "... test/test_ma.o"
 	@echo "... test/test_ma.i"
 	@echo "... test/test_ma.s"

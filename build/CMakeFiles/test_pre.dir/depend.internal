@@ -3,7 +3,6 @@
 
 CMakeFiles/test_pre.dir/test/test_pre.cpp.o
  ../src/alg_lib.h
- ../src/app_interface.h
  /mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT/test/test_pre.cpp
  /usr/include/eigen3/Eigen/Cholesky
  /usr/include/eigen3/Eigen/Core

@@ -47,7 +47,7 @@
 #include <vector>
 #include <sstream>
 
-#include "app_interface.h"   /* 对外只需要这一个头（它内部引入 alg_lib.h） */
+#include "alg_lib.h" 
 
 
 #define CC180C360(yaw)  ( (yaw)>0.0 ? (_2PI-(yaw)) : -(yaw) )   // counter-clockwise +-180deg -> clockwise 0~360deg for yaw

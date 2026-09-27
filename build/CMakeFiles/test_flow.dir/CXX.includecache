@@ -7,10 +7,6 @@
 #IncludeRegexTransform: 
 
 ../src/alg_lib.h
-app_interface.h
-../src/app_interface.h
-app_interface.h
-../src/app_interface.h
 array
 -
 algorithm
@@ -47,14 +43,6 @@ Eigen/Eigenvalues
 -
 ceres/ceres.h
 -
-
-../src/app_interface.h
-cmath
--
-cstdint
--
-alg_lib.h
-../src/alg_lib.h
 
 /mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT/test/test_flow.cpp
 alg_lib.h
