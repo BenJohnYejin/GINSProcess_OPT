@@ -2111,8 +2111,24 @@ void Preintegration::propagate(const ImuMeas &meas) {
     jac_ = F * jac_;
 
     /* 里程计预积分（可选） */
-    if (param_.odo_srw > 0.0 && meas.odovel != 0.0) {
-        const Eigen::Vector3d ds_body(meas.odovel, 0.0, 0.0);
+    if (meas.odovel != 0.0) {
+        /* 安装角 C_b^m * e_x。abv = [pitch, 0, yaw] */
+        const double ap = param_.abv.i;   /* pitch */
+        const double ay = param_.abv.j;   /* yaw   */
+        const Eigen::Vector3d cx(
+             std::cos(ay) * std::cos(ap),
+            -std::sin(ay) * std::cos(ap),
+            -std::sin(ap));
+
+        /* 刻度因子 */
+        const double ds_scaled = (1.0 + sodo_) * meas.odovel;
+
+        /* 杆臂补偿：omega_ib^b × l_OD；dtheta_e 是已经去偏后的角增量 */
+        const Eigen::Vector3d w_body_b = dtheta_e / dt;
+        const Eigen::Vector3d v_lev =
+            w_body_b.cross(param_.lvOD.toEigen());
+
+        const Eigen::Vector3d ds_body = ds_scaled * cx + v_lev * dt;
         s_ = s_ + vect3(R_mid * ds_body);
     }
 
@@ -2742,12 +2758,16 @@ struct GnssPosResidual {
     vect3 pos_, std_;
 };
 
+
 /* ============================================================================
- * 因子 3：GNSS 速度（3 维）
+ * 因子 3：GNSS 速度（3 维，增强版）
+ *
+ *   观测：vn（ENU，m/s）
+ *   残差：r_i = (v_i - vn_i) / sigma_i，可加 Huber
  * ==========================================================================*/
 struct GnssVelResidual {
-    GnssVelResidual(const vect3 &vn, const vect3 &std_dev)
-        : vn_(vn), std_(std_dev) {}
+    GnssVelResidual(const vect3 &vn, const vect3 &std_dev, double huber_delta = 0.0)
+        : vn_(vn), std_(std_dev), huber_delta_(huber_delta) {}
 
     template <typename T>
     bool operator()(const T *const mix, T *residual) const {
@@ -2755,55 +2775,108 @@ struct GnssVelResidual {
         Eigen::Map<Eigen::Matrix<T, 3, 1>>       r(residual);
         const Eigen::Matrix<T, 3, 1> vn = toEig3<T>(vn_);
         const Eigen::Matrix<T, 3, 1> sd = toEig3<T>(std_);
-        for (int i = 0; i < 3; ++i) r(i) = (v(i) - vn(i)) / sd(i);
+
+        for (int i = 0; i < 3; ++i) {
+            const T s = (sd(i) > T(1e-9)) ? sd(i) : T(1e-9);
+            r(i) = (v(i) - vn(i)) / s;
+        }
+
+        if (huber_delta_ > 0.0) {
+            for (int i = 0; i < 3; ++i) {
+                const T abs_r = ceres::abs(r(i));
+                if (abs_r > T(huber_delta_)) {
+                    const T sign_r = (r(i) >= T(0)) ? T(1) : T(-1);
+                    r(i) = sign_r * ceres::sqrt(
+                               T(2.0) * T(huber_delta_) * abs_r
+                               - T(huber_delta_) * T(huber_delta_));
+                }
+            }
+        }
         return true;
     }
 
     vect3 vn_, std_;
+    double huber_delta_;
 };
 
 /* ============================================================================
- * 因子 4：GNSS 航向（1 维）
+ * 因子 4：GNSS 航向（1 维，修正版）
+ *
+ *   观测：yaw_gnss（rad），已由 gnssYaw2AttYaw() 折算到内部姿态 yaw
+ *   残差：r = wrap(yaw(q) - yaw_gnss) / sigma
+ *       yaw(q) = atan2(-R(0,1), R(1,1))  ← 与 m2att / q2att 严格一致
+ *       wrap 用 atan2(sin, cos)，AutoDiff 友好
  * ==========================================================================*/
 struct GnssYawResidual {
-    GnssYawResidual(double yaw, double std_dev)
-        : yaw_(yaw), std_(std_dev) {}
+    GnssYawResidual(double yaw, double std_dev, double huber_delta = 0.0)
+        : yaw_(yaw),
+          std_(std_dev > 1e-9 ? std_dev : 1e-9),
+          huber_delta_(huber_delta) {}
 
     template <typename T>
     bool operator()(const T *const pose, T *residual) const {
         Eigen::Quaternion<T> q(pose[6], pose[3], pose[4], pose[5]);
         Eigen::Matrix<T, 3, 3> R = q.toRotationMatrix();
 
-        /* yaw = atan2(R(1,0), R(0,0))，与 m2att 的第三个分量一致 */
-        T yaw_est = ceres::atan2(R(1, 0), R(0, 0));
+        /* 与 m2att 严格一致：yaw = atan2(-R(0,1), R(1,1)) */
+        const T yaw_est = ceres::atan2(-R(0, 1), R(1, 1));
 
-        /* 角度环绕：规整到 (-π, π] */
-        T d = yaw_est - T(yaw_);
-        const T PI_T = T(3.14159265358979323846);
-        while (d >  PI_T) d -= T(2.0) * PI_T;
-        while (d < -PI_T) d += T(2.0) * PI_T;
+        const T d_raw = yaw_est - T(yaw_);
+        const T d     = ceres::atan2(ceres::sin(d_raw), ceres::cos(d_raw));
 
-        residual[0] = d / T(std_);
+        T r = d / T(std_);
+
+        if (huber_delta_ > 0.0) {
+            const T abs_r = ceres::abs(r);
+            if (abs_r > T(huber_delta_)) {
+                const T sign_r = (r >= T(0)) ? T(1) : T(-1);
+                r = sign_r * ceres::sqrt(
+                        T(2.0) * T(huber_delta_) * abs_r
+                        - T(huber_delta_) * T(huber_delta_));
+            }
+        }
+
+        residual[0] = r;
         return true;
     }
 
-    double yaw_, std_;
+    double yaw_;
+    double std_;
+    double huber_delta_;
 };
 
 /* ============================================================================
- * 因子 5：静止零速（3 维）
+ * 因子 5：静止零速（3 维，增强版）
+ *
+ *   观测：v = 0
+ *   残差：r_i = v_i / sigma，可加 Huber
  * ==========================================================================*/
 struct StaticVelResidual {
-    explicit StaticVelResidual(double sigma) : sigma_(sigma) {}
+    explicit StaticVelResidual(double sigma, double huber_delta = 0.0)
+        : sigma_(sigma > 1e-9 ? sigma : 1e-9),
+          huber_delta_(huber_delta) {}
 
     template <typename T>
     bool operator()(const T *const mix, T *residual) const {
         Eigen::Map<const Eigen::Matrix<T, 3, 1>> v(mix);
-        for (int i = 0; i < 3; ++i) residual[i] = v(i) / T(sigma_);
+        for (int i = 0; i < 3; ++i) {
+            T r = v(i) / T(sigma_);
+            if (huber_delta_ > 0.0) {
+                const T abs_r = ceres::abs(r);
+                if (abs_r > T(huber_delta_)) {
+                    const T sign_r = (r >= T(0)) ? T(1) : T(-1);
+                    r = sign_r * ceres::sqrt(
+                            T(2.0) * T(huber_delta_) * abs_r
+                            - T(huber_delta_) * T(huber_delta_));
+                }
+            }
+            residual[i] = r;
+        }
         return true;
     }
 
     double sigma_;
+    double huber_delta_;
 };
 
 /* ============================================================================
@@ -2849,6 +2922,77 @@ private:
 };
 
 /* ============================================================================
+ * 因子 7：里程计速度（3 维）
+ *
+ *   v_odo^b = (1 + sodo) * (dS/dt) * C_b^m * e_x + omega_ib^b × l_OD
+ *   r = R_b^n * v_odo^b - v^n
+ *
+ *   参数块：pose(7), mix(10)
+ *   sodo 位于 mix[9]；安装角 / 杆臂由构造函数传入（可后续扩展为待估量）
+ * ==========================================================================*/
+struct OdoVelResidual {
+    OdoVelResidual(double dS, double dt, const vect3 &omega_meas,
+                   const vect3 &abv, const vect3 &lvOD,
+                   double sigma, double huber_delta = 0.0)
+        : dS_(dS),
+          dt_(dt > 1e-9 ? dt : 1e-9),
+          omega_meas_(omega_meas),
+          abv_(abv), lvOD_(lvOD),
+          sigma_(sigma > 1e-9 ? sigma : 1e-9),
+          huber_delta_(huber_delta) {}
+
+    template <typename T>
+    bool operator()(const T *const pose, const T *const mix, T *residual) const {
+        Eigen::Quaternion<T> q(pose[6], pose[3], pose[4], pose[5]);
+        Eigen::Matrix<T, 3, 3> R_bn = q.toRotationMatrix();
+
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> v_n(mix);
+        const Eigen::Map<const Eigen::Matrix<T, 3, 1>> bg(mix + 3);
+        const T sodo = mix[9];
+
+        const T ap = T(abv_.i), ay = T(abv_.j);
+        Eigen::Matrix<T, 3, 1> cx;
+        cx <<  ceres::cos(ay) * ceres::cos(ap),
+              -ceres::sin(ay) * ceres::cos(ap),
+              -ceres::sin(ap);
+
+        Eigen::Matrix<T, 3, 1> w(
+            T(omega_meas_.i) - bg(0),
+            T(omega_meas_.j) - bg(1),
+            T(omega_meas_.k) - bg(2));
+        Eigen::Matrix<T, 3, 1> l(T(lvOD_.i), T(lvOD_.j), T(lvOD_.k));
+        Eigen::Matrix<T, 3, 1> v_lev = w.cross(l);
+
+        Eigen::Matrix<T, 3, 1> v_odo_b =
+            (T(1.0) + sodo) * T(dS_ / dt_) * cx + v_lev;
+
+        Eigen::Matrix<T, 3, 1> v_odo_n = R_bn * v_odo_b;
+
+        Eigen::Map<Eigen::Matrix<T, 3, 1>> r(residual);
+        r = (v_n - v_odo_n) / T(sigma_);
+
+        if (huber_delta_ > 0.0) {
+            for (int i = 0; i < 3; ++i) {
+                const T abs_r = ceres::abs(r(i));
+                if (abs_r > T(huber_delta_)) {
+                    const T sign_r = (r(i) >= T(0)) ? T(1) : T(-1);
+                    r(i) = sign_r * ceres::sqrt(
+                               T(2.0) * T(huber_delta_) * abs_r
+                               - T(huber_delta_) * T(huber_delta_));
+                }
+            }
+        }
+        return true;
+    }
+
+    double dS_, dt_;
+    vect3  omega_meas_;
+    vect3  abv_, lvOD_;
+    double sigma_;
+    double huber_delta_;
+};
+
+/* ============================================================================
  * GraphOptimizer::buildProblem
  * ==========================================================================*/
 void GraphOptimizer::buildProblem(ceres::Problem &problem,
@@ -2890,7 +3034,7 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
     for (auto &f : frames) {
         if (!f.has_gnss_vel) continue;
         auto *cost = new ceres::AutoDiffCostFunction<GnssVelResidual, 3, 10>(
-            new GnssVelResidual(f.gnss_vn, f.gnss_vn_std));
+            new GnssVelResidual(f.gnss_vn, f.gnss_vn_std, 1.5));
         problem.AddResidualBlock(cost, nullptr, f.mix.data());
     }
 
@@ -2898,7 +3042,7 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
     for (auto &f : frames) {
         if (!f.has_gnss_yaw || f.gnss_yaw_std <= 0.0) continue;
         auto *cost = new ceres::AutoDiffCostFunction<GnssYawResidual, 1, 7>(
-            new GnssYawResidual(f.gnss_yaw, f.gnss_yaw_std));
+            new GnssYawResidual(f.gnss_yaw, f.gnss_yaw_std, 1.5));
         problem.AddResidualBlock(cost, nullptr, f.pose.data());
     }
 
@@ -2906,8 +3050,19 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
     for (auto &f : frames) {
         if (!f.is_static) continue;
         auto *cost = new ceres::AutoDiffCostFunction<StaticVelResidual, 3, 10>(
-            new StaticVelResidual(opt_.static_vel_sigma));
+            new StaticVelResidual(opt_.static_vel_sigma, 1.0));
         problem.AddResidualBlock(cost, nullptr, f.mix.data());
+    }
+
+    /* ---- 7) 里程计速度因子 ---- */
+    for (auto &f : frames) {
+        if (!f.has_odo) continue;
+        auto *cost = new ceres::AutoDiffCostFunction<OdoVelResidual, 3, 7, 10>(
+            new OdoVelResidual(f.odo_dS, f.odo_dt, f.odo_omega_meas,
+                               opt_.odo_abv, opt_.odo_lvOD,
+                               f.odo_std, 1.5));
+        problem.AddResidualBlock(cost, nullptr,
+                                 f.pose.data(), f.mix.data());
     }
 }
 
@@ -3152,7 +3307,6 @@ public:
     bool isStatic() const {
         if (buf_.size() < 10) return false;
 
-        /* 计算窗口内的均值 */
         Eigen::Vector3d wm_mean = Eigen::Vector3d::Zero();
         Eigen::Vector3d vm_mean = Eigen::Vector3d::Zero();
         for (const auto &s : buf_) {
@@ -3162,24 +3316,25 @@ public:
         wm_mean /= buf_.size();
         vm_mean /= buf_.size();
 
-        /* 计算去均值后的方差（RMS of deviation） */
         double wm_var = 0.0, vm_var = 0.0;
         for (const auto &s : buf_) {
             Eigen::Vector3d dw(s.wm[0], s.wm[1], s.wm[2]);
             Eigen::Vector3d dv(s.vm[0], s.vm[1], s.vm[2]);
-            dw -= wm_mean;
-            dv -= vm_mean;
+            dw -= wm_mean; dv -= vm_mean;
             wm_var += dw.squaredNorm();
             vm_var += dv.squaredNorm();
         }
         wm_var /= buf_.size();
         vm_var /= buf_.size();
 
-        /* 判据：RMS 小于阈值 且 均值速度增量的模接近 g·dt（说明静止悬停） */
         const double wm_rms = std::sqrt(wm_var);
         const double vm_rms = std::sqrt(vm_var);
 
-        return (wm_rms < thr_g_) && (vm_rms < thr_a_);
+        /* 静止时加表均值模长应接近 g，这一条能剔除掉"匀速运动"被误判静止 */
+        const double g_norm = vm_mean.norm();
+        const double g_err  = std::fabs(g_norm - G0);   /* G0 在 app_interface.h */
+
+        return (wm_rms < thr_g_) && (vm_rms < thr_a_) && (g_err < 0.5);
     }
 
 private:
@@ -3229,7 +3384,7 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
     ErrorAccumulator acc_init;   /* 初值 vs GNSS */
     ErrorAccumulator acc_opt;    /* 优化后 vs GNSS */
 
-    auto evalFrameCompare = [](const Frame &f) {
+        auto evalFrameCompare = [](const Frame &f) {
         FrameCompare c;
         c.time = f.time;
 
@@ -3255,7 +3410,7 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
             c.dv_3d = std::sqrt(ve * ve + vn * vn + vu * vu);
         }
 
-        /* --- 航向（用折算后的双天线航向做参考，与是否启用航向因子无关）--- */
+        /* --- 航向 --- */
         if (f.has_raw_yaw) {
             c.has_gnss_yaw = true;
             quat q(f.pose[6], f.pose[3], f.pose[4], f.pose[5]);
@@ -3305,6 +3460,8 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
     gopt_opt.whiten_preint  = opt.whiten_preint;
     gopt_opt.bias_jac       = opt.bias_jac;
     gopt_opt.fix_first_pose = opt.fix_first_pose;
+    gopt_opt.odo_abv   = opt.odo_abv;
+    gopt_opt.odo_lvOD  = opt.odo_lvOD;
     if (const char *it = std::getenv("IPOS3_MAX_ITER")) {
         gopt_opt.max_iterations = std::atoi(it);
     }
@@ -3336,7 +3493,7 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
                     raw[first_gnss].yaw / DEG);
 
         f0.pose = { 0, 0, 0, q0.q1, q0.q2, q0.q3, q0.q0 };
-        f0.mix  = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        f0.mix = { 0, 0, 0, 0, 0, 0, 0, 0, 0, opt.odo_sodo_init };
         f0.has_gnss = true;
         f0.gnss_pos = vect3(0, 0, 0);   /* 局部系原点 */
         f0.gnss_std = vect3(opt.gnss_pos_scale * std::max(raw[first_gnss].posstd[0], 0.5),
@@ -3392,6 +3549,7 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
         m.dvel   = vect3(s.vm[0], s.vm[1], s.vm[2]);
         const auto t_int_begin = std::chrono::steady_clock::now();
         preint.integration(m);
+
         t_preint += std::chrono::duration<double>(
             std::chrono::steady_clock::now() - t_int_begin).count();
         t_last_imu = s.t;
@@ -3449,7 +3607,7 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
                     q_pred.q1, q_pred.q2, q_pred.q3, q_pred.q0 };
         fk.mix  = { v_pred(0), v_pred(1), v_pred(2),
                     fprev.mix[3], fprev.mix[4], fprev.mix[5],
-                    fprev.mix[6], fprev.mix[7], fprev.mix[8], 0.0 };
+                    fprev.mix[6], fprev.mix[7], fprev.mix[8], fprev.mix[9] };
 
         /* 4.5 观测填充 */
         if (has_gnss_now) {
@@ -3460,43 +3618,51 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
                                 opt.gnss_pos_scale * std::max(s.posstd[2], 1.0));
             st.n_gnss_used++;
         } else if (gnss_in_gap) {
-            /* 模拟中断：位置只留作参考真值，不加因子 */
             fk.gnss_pos    = blhToNeu(lf, s);
             fk.gnss_in_gap = true;
         }
 
-        /* 中断区间内所有 GNSS 观测量（位置/速度/航向）都不进因子 */
+        /* --- GNSS 速度因子 --- */
         if (opt.use_gnss_vel && !gnss_in_gap) {
             const double vn_norm = std::sqrt(s.vngps[0]*s.vngps[0] +
                                              s.vngps[1]*s.vngps[1] +
                                              s.vngps[2]*s.vngps[2]);
             if (vn_norm > 0.1) {
+                const double sat_scale = (s.satnum > 1.0)
+                    ? std::max(1.0, 8.0 / s.satnum) : 1.0;
                 fk.has_gnss_vel = true;
                 fk.gnss_vn     = vect3(s.vngps[0], s.vngps[1], s.vngps[2]);
-                fk.gnss_vn_std = vect3(opt.gnss_vel_scale * 0.1,
-                                       opt.gnss_vel_scale * 0.1,
-                                       opt.gnss_vel_scale * 0.2);
+                fk.gnss_vn_std = vect3(opt.gnss_vel_scale * 0.1 * sat_scale,
+                                       opt.gnss_vel_scale * 0.1 * sat_scale,
+                                       opt.gnss_vel_scale * 0.2 * sat_scale);
             }
         }
 
-        /* 双天线航向：先按安装方式折算到内部 yaw。
-         * 原始值总记录（用于一致性统计），是否进因子由 opt.use_gnss_yaw 决定。 */
-        /* yawrms 单位是 deg（见 YAW_ALIGN），阈值 5 deg 与原工程一致 */
+        /* --- 双天线航向 --- */
         if (opt.ant_mode != ANT_MODE_ONE && !gnss_in_gap &&
             s.yawrms > 0.0 && s.yawrms < 5.0 &&
             std::fabs(s.yaw) > 1e-6) {
             fk.has_raw_yaw  = true;
             fk.raw_yaw_conv = gnssYaw2AttYaw(s.yaw, opt.ant_mode, opt.yaw_offset);
             if (opt.use_gnss_yaw) {
+                const double base_m   = std::max(s.baseline, 0.5);
+                const double sig_ant  = std::max(s.yawrms * DEG, 0.5 * DEG);
+                const double sig_base = std::atan(0.01 / base_m);
                 fk.has_gnss_yaw = true;
                 fk.gnss_yaw     = fk.raw_yaw_conv;
-                fk.gnss_yaw_std = std::max(s.yawrms * DEG, 0.5 * DEG);
+                fk.gnss_yaw_std = std::max(sig_ant, sig_base);
             }
         }
 
-        if (opt.use_static && static_det.isStatic()) {
-            fk.is_static = true;
-            st.n_static_frames++;
+        /* --- 里程计 --- */
+        if (opt.use_odometer && !gnss_in_gap &&
+            s.dS > 1e-6 && s.dS < 90.0) {
+            fk.has_odo        = true;
+            fk.odo_dS         = s.dS;
+            fk.odo_dt         = dt;
+            fk.odo_omega_meas = vect3(s.wm[0] / dt, s.wm[1] / dt, s.wm[2] / dt);
+            fk.odo_std        = opt.odo_vel_scale * opt.odo_vel_std;
+            st.n_odo_used++;
         }
 
         /* 4.6 挂预积分：用 frames.back() 而不是 fprev */

@@ -82,9 +82,9 @@ int main(int argc, char *argv[]) {
     RunnerOptions opt;
     opt.kf_dt         = 1.0;
     opt.max_keyframes = 15;
-    opt.use_gnss_vel  = false;
-    opt.use_gnss_yaw  = false;
-    opt.use_static    = false;
+    opt.use_gnss_vel  = true;
+    opt.use_gnss_yaw  = true;
+    opt.use_static    = true;
     opt.whiten_preint = false;   /* 见 alg_lib.h：协方差未标定前不白化 */
 
     for (int i = 1; i < argc; ++i) {

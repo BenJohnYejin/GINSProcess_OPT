@@ -579,6 +579,13 @@ struct Frame {
     bool has_lin{false};
     std::array<double, NUM_POSE> pose_lin{};
     std::array<double, NUM_MIX_ODO> mix_lin{};
+
+    /* 里程计速度观测（前向速度，b 系） ------------------------------------ */
+    bool   has_odo{false};
+    double odo_dS{0.0};               /*< 里程增量 (m) */
+    double odo_dt{0.0};               /*< 对应时间间隔 (s) */
+    vect3  odo_omega_meas{};          /*< 该段陀螺原始测量 (rad/s)，用于杆臂补偿 */
+    double odo_std{0.05};             /*< 里程速度标准差 (m/s) */
 };
 
 mat3 Rot(double angle, char axis);
@@ -922,6 +929,8 @@ public:
         bool   whiten_preint     = false;/*< 预积分残差按协方差白化（默认关，见 RunnerOptions） */
         bool   bias_jac          = false;/*< 残差里用零偏一阶雅可比（默认关，见 RunnerOptions） */
         int    min_frames_solve  = 2;    /*< 达到该帧数即开始求解（消除冷启动纯外推） */
+        vect3  odo_abv{0.0, 0.0, 0.0};    /*< 安装角 [pitch, 0, yaw]，rad */
+        vect3  odo_lvOD{0.0, 0.0, 0.0};   /*< 杆臂（b 系，m） */
     };
 
     GraphOptimizer() = default;
@@ -1057,7 +1066,7 @@ struct RunnerOptions {
      * yaw_offset 是天线安装角（rad），等价于原工程的 conf_GNSSAgle。 */
     /* 默认 FB_F：与 ipos3g_cmake/src/nav.cpp 里这台设备的配置一致
      * （configPara.ant_mode = Ant_Mode_FB_F, conf_GNSSAgle = 0）。 */
-    int    ant_mode           = ANT_MODE_FB_F;  /*< AntMode，见上 */
+    int    ant_mode           = ANT_MODE_LR_L;  /*< AntMode，见上 */
     double yaw_offset         = 0.0;   /*< 天线安装角 (rad) */
     bool   init_yaw_from_gnss = true;  /*< 初始姿态用双天线航向（不再固定 yaw0=0） */
 
@@ -1079,8 +1088,17 @@ struct RunnerOptions {
      * 零偏先验标定好之后再打开更有意义。 */
     bool   bias_jac          = false;
 
+   /* ---- 里程计 ---------------------------------------------------- */
+    bool   use_odometer   = false;    /*< 是否启用里程计因子 */
+    double odo_vel_scale  = 1.0;      /*< 整体缩放 */
+    double odo_vel_std    = 0.05;     /*< 里程速度标准差 (m/s) */
+    vect3  odo_abv{0.0, 0.0, 0.0};    /*< 安装角 [pitch, 0, yaw]，rad */
+    vect3  odo_lvOD{0.0, 0.0, 0.0};   /*< 杆臂（b 系，m） */
+    double odo_sodo_init  = 0.0;      /*< 刻度因子初值 */
+
     /* 每帧对比 CSV 输出（空则不输出） */
     std::string compare_csv_path;
+
 };
 
 struct RunnerStats {
@@ -1089,6 +1107,7 @@ struct RunnerStats {
     int    n_kf_total     = 0;      /*< 累计处理的关键帧 */
     int    n_gnss_used    = 0;
     int    n_static_frames = 0;
+    int    n_odo_used     = 0;
     double total_time     = 0.0;
     double final_cost     = 0.0;
 
