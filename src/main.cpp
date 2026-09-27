@@ -45,6 +45,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <sstream>
 
 #include "app_interface.h"   /* 对外只需要这一个头（它内部引入 alg_lib.h） */
 
@@ -86,6 +87,8 @@ int main(int argc, char *argv[]) {
     opt.use_gnss_yaw  = true;
     opt.use_static    = true;
     opt.whiten_preint = false;   /* 见 alg_lib.h：协方差未标定前不白化 */
+    opt.calib_mode = true;
+    opt.use_odometer = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -123,6 +126,28 @@ int main(int argc, char *argv[]) {
                 if (colon != std::string::npos) {
                     opt.gnss_gap_t0 = std::atof(val.substr(0, colon).c_str());
                     opt.gnss_gap_t1 = std::atof(val.substr(colon + 1).c_str());
+                }
+            } else if (key == "--calib") {
+                opt.calib_mode = true;
+            } else if (key == "--use-odometer") {
+                opt.use_odometer = true;
+            } else if (key == "--odo-std") {
+                opt.odo_vel_std = std::atof(val.c_str());
+            } else if (key == "--calib-init") {
+                /* 格式: sodo,ap_deg,ay_deg,lx,ly,lz,yoff_deg */
+                double v[7] = {0};
+                int n = 0;
+                std::stringstream ss(val);
+                std::string tok;
+                while (std::getline(ss, tok, ',') && n < 7) {
+                    v[n++] = std::atof(tok.c_str());
+                }
+                if (n == 7) {
+                    opt.calib_init.sodo           = v[0];
+                    opt.calib_init.abv_pitch      = v[1] * DEG;
+                    opt.calib_init.abv_yaw        = v[2] * DEG;
+                    opt.calib_init.lvOD           = vect3(v[3], v[4], v[5]);
+                    opt.calib_init.yaw_gnss_offset = v[6] * DEG;
                 }
             } else {
                 std::fprintf(stderr, "未知选项: %s\n", a.c_str());

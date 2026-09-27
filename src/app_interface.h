@@ -108,7 +108,7 @@ constexpr int NUM_STATE     = 15; /*< 预积分残差维数 */
 constexpr int NUM_STATE_ODO = 19; /*< 再加上里程位移(3) 与比例因子(1) */
 constexpr int NUM_NOISE     = 12; /*< IMU 噪声维数 */
 constexpr int NUM_NOISE_ODO = 16; /*< 再加上里程计白噪声(3) 与比例因子随机游走(1) */
-
+constexpr int NUM_CALIB     = 7;  /*< {sodo, abv_p, abv_y, lvOD_x, lvOD_y, lvOD_z, yaw_off} */
 /* ============================================================================
  * 对外接口总入口
  * ----------------------------------------------------------------------------

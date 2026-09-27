@@ -2800,32 +2800,37 @@ struct GnssVelResidual {
 };
 
 /* ============================================================================
- * 因子 4：GNSS 航向（1 维，修正版）
+ * 因子 4：GNSS 航向（1 维，含航向偏置标定）
  *
- *   观测：yaw_gnss（rad），已由 gnssYaw2AttYaw() 折算到内部姿态 yaw
- *   残差：r = wrap(yaw(q) - yaw_gnss) / sigma
- *       yaw(q) = atan2(-R(0,1), R(1,1))  ← 与 m2att / q2att 严格一致
- *       wrap 用 atan2(sin, cos)，AutoDiff 友好
+ *   yaw_gnss（已做 ant_mode 折算，但不含 yaw_offset）
+ *   残差：r = wrap(yaw(q) + yaw_off - yaw_gnss) / sigma
+ *   yaw_off 从标定参数块 calib[6] 读取
+ * ==========================================================================*/
+/* ============================================================================
+ * 因子 4：GNSS 航向（1 维，含航向偏置标定）
+ *
+ *   观测 yaw_gnss（已做 ant_mode 折算，但不含 yaw_offset）
+ *   残差  r = wrap(yaw(q) + yaw_off - yaw_gnss) / sigma
+ *   yaw_off 从标定参数块 calib[6] 读取
  * ==========================================================================*/
 struct GnssYawResidual {
-    GnssYawResidual(double yaw, double std_dev, double huber_delta = 0.0)
-        : yaw_(yaw),
+    GnssYawResidual(double yaw_gnss, double std_dev, double huber_delta = 0.0)
+        : yaw_gnss_(yaw_gnss),
           std_(std_dev > 1e-9 ? std_dev : 1e-9),
           huber_delta_(huber_delta) {}
 
     template <typename T>
-    bool operator()(const T *const pose, T *residual) const {
+    bool operator()(const T *const pose, const T *const calib, T *residual) const {
         Eigen::Quaternion<T> q(pose[6], pose[3], pose[4], pose[5]);
         Eigen::Matrix<T, 3, 3> R = q.toRotationMatrix();
 
-        /* 与 m2att 严格一致：yaw = atan2(-R(0,1), R(1,1)) */
-        const T yaw_est = ceres::atan2(-R(0, 1), R(1, 1));
+        const T yaw_est = ceres::atan2(-R(0, 1), R(1, 1));  /* 与 m2att 一致 */
+        const T yaw_off = calib[6];                          /* 标定量 */
 
-        const T d_raw = yaw_est - T(yaw_);
+        const T d_raw = yaw_est + yaw_off - T(yaw_gnss_);
         const T d     = ceres::atan2(ceres::sin(d_raw), ceres::cos(d_raw));
 
         T r = d / T(std_);
-
         if (huber_delta_ > 0.0) {
             const T abs_r = ceres::abs(r);
             if (abs_r > T(huber_delta_)) {
@@ -2835,14 +2840,11 @@ struct GnssYawResidual {
                         - T(huber_delta_) * T(huber_delta_));
             }
         }
-
         residual[0] = r;
         return true;
     }
 
-    double yaw_;
-    double std_;
-    double huber_delta_;
+    double yaw_gnss_, std_, huber_delta_;
 };
 
 /* ============================================================================
@@ -2922,52 +2924,61 @@ private:
 };
 
 /* ============================================================================
- * 因子 7：里程计速度（3 维）
+ * 因子 7：里程计速度（3 维，含刻度因子 / 安装角 / 杆臂标定）
  *
  *   v_odo^b = (1 + sodo) * (dS/dt) * C_b^m * e_x + omega_ib^b × l_OD
  *   r = R_b^n * v_odo^b - v^n
  *
- *   参数块：pose(7), mix(10)
- *   sodo 位于 mix[9]；安装角 / 杆臂由构造函数传入（可后续扩展为待估量）
+ *   标定量从 calib 块读取：
+ *     calib[0]     = sodo
+ *     calib[1]     = abv_pitch
+ *     calib[2]     = abv_yaw
+ *     calib[3..5]  = lvOD
+ *     calib[6]     = yaw_off（本因子不使用）
  * ==========================================================================*/
 struct OdoVelResidual {
     OdoVelResidual(double dS, double dt, const vect3 &omega_meas,
-                   const vect3 &abv, const vect3 &lvOD,
                    double sigma, double huber_delta = 0.0)
         : dS_(dS),
           dt_(dt > 1e-9 ? dt : 1e-9),
           omega_meas_(omega_meas),
-          abv_(abv), lvOD_(lvOD),
           sigma_(sigma > 1e-9 ? sigma : 1e-9),
           huber_delta_(huber_delta) {}
 
     template <typename T>
-    bool operator()(const T *const pose, const T *const mix, T *residual) const {
+    bool operator()(const T *const pose, const T *const mix,
+                    const T *const calib, T *residual) const {
         Eigen::Quaternion<T> q(pose[6], pose[3], pose[4], pose[5]);
         Eigen::Matrix<T, 3, 3> R_bn = q.toRotationMatrix();
 
         Eigen::Map<const Eigen::Matrix<T, 3, 1>> v_n(mix);
         const Eigen::Map<const Eigen::Matrix<T, 3, 1>> bg(mix + 3);
-        const T sodo = mix[9];
 
-        const T ap = T(abv_.i), ay = T(abv_.j);
+        /* --- 从标定块读参数 --- */
+        const T sodo = calib[0];
+        const T ap   = calib[1];
+        const T ay   = calib[2];
+        Eigen::Matrix<T, 3, 1> l(calib[3], calib[4], calib[5]);
+
+        /* --- 安装角：C_b^m * e_x --- */
         Eigen::Matrix<T, 3, 1> cx;
         cx <<  ceres::cos(ay) * ceres::cos(ap),
               -ceres::sin(ay) * ceres::cos(ap),
               -ceres::sin(ap);
 
+        /* --- 杆臂：omega_ib^b × l_OD --- */
         Eigen::Matrix<T, 3, 1> w(
             T(omega_meas_.i) - bg(0),
             T(omega_meas_.j) - bg(1),
             T(omega_meas_.k) - bg(2));
-        Eigen::Matrix<T, 3, 1> l(T(lvOD_.i), T(lvOD_.j), T(lvOD_.k));
         Eigen::Matrix<T, 3, 1> v_lev = w.cross(l);
 
+        /* --- 里程计速度（b 系） --- */
         Eigen::Matrix<T, 3, 1> v_odo_b =
             (T(1.0) + sodo) * T(dS_ / dt_) * cx + v_lev;
 
+        /* --- 转 n 系并求残差 --- */
         Eigen::Matrix<T, 3, 1> v_odo_n = R_bn * v_odo_b;
-
         Eigen::Map<Eigen::Matrix<T, 3, 1>> r(residual);
         r = (v_n - v_odo_n) / T(sigma_);
 
@@ -2987,9 +2998,7 @@ struct OdoVelResidual {
 
     double dS_, dt_;
     vect3  omega_meas_;
-    vect3  abv_, lvOD_;
-    double sigma_;
-    double huber_delta_;
+    double sigma_, huber_delta_;
 };
 
 /* ============================================================================
@@ -2998,14 +3007,18 @@ struct OdoVelResidual {
 void GraphOptimizer::buildProblem(ceres::Problem &problem,
                                   std::vector<Frame> &frames,
                                   const vect3 &g_n) {
-    /* ---- 1) 参数块 + Manifold ---- */
+    /* ---- 0) 标定参数块（全局，窗口内共享） ---- */
+    problem.AddParameterBlock(calib_data_.data(), NUM_CALIB);
+    if (!opt_.calib_mode) {
+        problem.SetParameterBlockConstant(calib_data_.data());   /* 导航模式：固定 */
+    }
+
+    /* ---- 1) 帧参数块 + Manifold ---- */
     for (auto &f : frames) {
         problem.AddParameterBlock(f.pose.data(), NUM_POSE);
         problem.SetManifold(f.pose.data(), new PoseManifold());
         problem.AddParameterBlock(f.mix.data(), NUM_MIX_ODO);
     }
-
-    /* gauge fix：固定第一帧 pose */
     if (opt_.fix_first_pose && !frames.empty()) {
         problem.SetParameterBlockConstant(frames.front().pose.data());
     }
@@ -3038,12 +3051,13 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
         problem.AddResidualBlock(cost, nullptr, f.mix.data());
     }
 
-    /* ---- 5) GNSS 航向因子 ---- */
+    /* ---- 5) GNSS 航向因子（引用标定块 calib[6]） ---- */
     for (auto &f : frames) {
         if (!f.has_gnss_yaw || f.gnss_yaw_std <= 0.0) continue;
-        auto *cost = new ceres::AutoDiffCostFunction<GnssYawResidual, 1, 7>(
+        auto *cost = new ceres::AutoDiffCostFunction<GnssYawResidual, 1, 7, NUM_CALIB>(
             new GnssYawResidual(f.gnss_yaw, f.gnss_yaw_std, 1.5));
-        problem.AddResidualBlock(cost, nullptr, f.pose.data());
+        problem.AddResidualBlock(cost, nullptr,
+                                 f.pose.data(), calib_data_.data());
     }
 
     /* ---- 6) 静止零速因子 ---- */
@@ -3054,15 +3068,15 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
         problem.AddResidualBlock(cost, nullptr, f.mix.data());
     }
 
-    /* ---- 7) 里程计速度因子 ---- */
+    /* ---- 7) 里程计速度因子（引用整个标定块） ---- */
     for (auto &f : frames) {
         if (!f.has_odo) continue;
-        auto *cost = new ceres::AutoDiffCostFunction<OdoVelResidual, 3, 7, 10>(
+        auto *cost = new ceres::AutoDiffCostFunction<OdoVelResidual, 3, 7, 10, NUM_CALIB>(
             new OdoVelResidual(f.odo_dS, f.odo_dt, f.odo_omega_meas,
-                               opt_.odo_abv, opt_.odo_lvOD,
                                f.odo_std, 1.5));
         problem.AddResidualBlock(cost, nullptr,
-                                 f.pose.data(), f.mix.data());
+                                 f.pose.data(), f.mix.data(),
+                                 calib_data_.data());
     }
 }
 
@@ -3380,11 +3394,40 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
                   raw[first_gnss].posgps[1],
                   raw[first_gnss].posgps[2]));
 
-    /* ---- 2.5) GNSS 对比累积器 ---- */
-    ErrorAccumulator acc_init;   /* 初值 vs GNSS */
-    ErrorAccumulator acc_opt;    /* 优化后 vs GNSS */
 
-        auto evalFrameCompare = [](const Frame &f) {
+    /* ---- 3) 初始化滑窗 ---- */
+    std::vector<Frame> frames;
+    StaticDetector static_det(opt.static_thresh_gyr, opt.static_thresh_acc);
+
+    GraphOptimizer::Options gopt_opt;
+    gopt_opt.max_keyframes  = opt.max_keyframes;
+    gopt_opt.max_iterations = 50;
+    gopt_opt.whiten_preint  = opt.whiten_preint;
+    gopt_opt.bias_jac       = opt.bias_jac;
+    gopt_opt.fix_first_pose = opt.fix_first_pose;
+    gopt_opt.odo_abv        = opt.odo_abv;
+    gopt_opt.odo_lvOD       = opt.odo_lvOD;
+    gopt_opt.calib_mode     = opt.calib_mode;   // ← 补这一行
+    if (const char *it = std::getenv("IPOS3_MAX_ITER")) {
+        gopt_opt.max_iterations = std::atoi(it);
+    }
+    GraphOptimizer gopt(gopt_opt);
+
+    /* 标定参数初值（标定与导航通用） */
+    CalibState calib = opt.calib_init;
+    /* 兼容旧配置：如果 calib_init 未被填过，从 odo_* 与 yaw_offset 派生 */
+    if (calib.sodo == 0.0 && calib.abv_pitch == 0.0 && calib.abv_yaw == 0.0 &&
+        calib.lvOD.i == 0.0 && calib.lvOD.j == 0.0 && calib.lvOD.k == 0.0 &&
+        calib.yaw_gnss_offset == 0.0) {
+        calib.sodo           = opt.odo_sodo_init;
+        calib.abv_pitch      = opt.odo_abv.i;
+        calib.abv_yaw        = opt.odo_abv.j;
+        calib.lvOD           = opt.odo_lvOD;
+        calib.yaw_gnss_offset = opt.yaw_offset;
+    }
+    gopt.setCalibState(calib);
+
+    auto evalFrameCompare = [&gopt](const Frame &f) {
         FrameCompare c;
         c.time = f.time;
 
@@ -3410,25 +3453,22 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
             c.dv_3d = std::sqrt(ve * ve + vn * vn + vu * vu);
         }
 
-        /* --- 航向 --- */
+        /* --- 航向：raw_yaw_conv 只含 ant_mode 折算，需叠加 yaw_off_calib --- */
         if (f.has_raw_yaw) {
+            const double yoff = gopt.getCalibState().yaw_gnss_offset;  // ← 实时
             c.has_gnss_yaw = true;
             quat q(f.pose[6], f.pose[3], f.pose[4], f.pose[5]);
             double yaw_est = q2att(q).k;
-            c.dyaw_rad = diffYaw(yaw_est, f.raw_yaw_conv);
+            double yaw_ref = diffYaw(f.raw_yaw_conv + yoff, 0.0);
+            c.dyaw_rad = diffYaw(yaw_est, yaw_ref);
             c.dyaw_deg = c.dyaw_rad / DEG;
         }
 
         return c;
     };
 
-    /* 汇总用的轻量版（只关心位置模长，用于统计）*/
-    auto evalOneFrame = [](const Frame &f, ErrorAccumulator &acc) {
-        if (!f.has_gnss) return;
-        vect3 p(f.pose[0], f.pose[1], f.pose[2]);
-        double e = norm(p - f.gnss_pos);
-        acc.add(f.time, e);
-    };
+    ErrorAccumulator acc_init;   /* 初值 vs GNSS */
+    ErrorAccumulator acc_opt;    /* 优化后 vs GNSS */
 
     /* 记录某帧的对比结果（初值/优化后共用一份 FrameCompare 表），
      * 并顺便累积"估计航向 vs 双天线航向"的统计量。 */
@@ -3450,22 +3490,21 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
         }
     };
 
-    /* ---- 3) 初始化滑窗 ---- */
-    std::vector<Frame> frames;
-    StaticDetector static_det(opt.static_thresh_gyr, opt.static_thresh_acc);
+    /* 汇总用的轻量版（只关心位置模长，用于统计）*/
+    auto evalOneFrame = [](const Frame &f, ErrorAccumulator &acc) {
+        if (!f.has_gnss) return;
+        vect3 p(f.pose[0], f.pose[1], f.pose[2]);
+        double e = norm(p - f.gnss_pos);
+        acc.add(f.time, e);
+    };
 
-    GraphOptimizer::Options gopt_opt;
-    gopt_opt.max_keyframes  = opt.max_keyframes;
-    gopt_opt.max_iterations = 50;
-    gopt_opt.whiten_preint  = opt.whiten_preint;
-    gopt_opt.bias_jac       = opt.bias_jac;
-    gopt_opt.fix_first_pose = opt.fix_first_pose;
-    gopt_opt.odo_abv   = opt.odo_abv;
-    gopt_opt.odo_lvOD  = opt.odo_lvOD;
-    if (const char *it = std::getenv("IPOS3_MAX_ITER")) {
-        gopt_opt.max_iterations = std::atoi(it);
-    }
-    GraphOptimizer gopt(gopt_opt);
+    std::printf("[runner] %s模式 | 标定初值: sodo=%.4f, abv=(%.2f, %.2f)°, lvOD=(%.3f, %.3f, %.3f), yaw_off=%.3f°\n",
+                opt.calib_mode ? "标定" : "导航",
+                calib.sodo,
+                calib.abv_pitch / DEG, calib.abv_yaw / DEG,
+                calib.lvOD.i, calib.lvOD.j, calib.lvOD.k,
+                calib.yaw_gnss_offset / DEG);
+
     gopt.clearPrior();
 
     /* 第一帧：姿态取第一个有效 yaw，位置 NEU=0 */
@@ -3509,6 +3548,8 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
     pp.gyr_bias_std = 10.0 * DPH;          /* 10 deg/hr */
     pp.acc_bias_std = 1.0 * MG;            /* 1 mg */
     pp.corr_time    = 3600.0;
+    pp.abv  = opt.odo_abv;
+    pp.lvOD = opt.odo_lvOD;
 
     Preintegration preint(pp);
     preint.setBias(O31, O31);
@@ -3547,6 +3588,10 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
         m.dt     = dt;
         m.dtheta = vect3(s.wm[0], s.wm[1], s.wm[2]);
         m.dvel   = vect3(s.vm[0], s.vm[1], s.vm[2]);
+        if (opt.use_odometer && s.dS < 90.0) {
+            m.odovel = s.dS;   // ← 补这一行
+        }
+
         const auto t_int_begin = std::chrono::steady_clock::now();
         preint.integration(m);
 
@@ -3642,15 +3687,15 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
         if (opt.ant_mode != ANT_MODE_ONE && !gnss_in_gap &&
             s.yawrms > 0.0 && s.yawrms < 5.0 &&
             std::fabs(s.yaw) > 1e-6) {
+            /* 只做 ant_mode 折算（±90° / 180°），yaw_offset 交给因子内部 */
+            const double yaw_ant = gnssYaw2AttYaw(s.yaw, opt.ant_mode, 0.0);
+
             fk.has_raw_yaw  = true;
-            fk.raw_yaw_conv = gnssYaw2AttYaw(s.yaw, opt.ant_mode, opt.yaw_offset);
+            fk.raw_yaw_conv = yaw_ant;   /* 用于统计时需叠加上 calib 里的 yaw_off */
             if (opt.use_gnss_yaw) {
-                const double base_m   = std::max(s.baseline, 0.5);
-                const double sig_ant  = std::max(s.yawrms * DEG, 0.5 * DEG);
-                const double sig_base = std::atan(0.01 / base_m);
                 fk.has_gnss_yaw = true;
-                fk.gnss_yaw     = fk.raw_yaw_conv;
-                fk.gnss_yaw_std = std::max(sig_ant, sig_base);
+                fk.gnss_yaw     = yaw_ant;
+                fk.gnss_yaw_std = std::max(s.yawrms * DEG, 0.5 * DEG);
             }
         }
 
@@ -3757,6 +3802,17 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
             trajectory.push_back(f);            // ← 新增
         }
     }
+
+    /* 记录最终标定状态 */
+    st.calib_final = gopt.getCalibState();
+    std::printf("\n========== 标定参数（%s模式）==========\n",
+                opt.calib_mode ? "标定" : "导航");
+    std::printf("  刻度因子 sodo   : %+10.6f\n", st.calib_final.sodo);
+    std::printf("  安装角 pitch    : %+10.4f deg\n", st.calib_final.abv_pitch / DEG);
+    std::printf("  安装角 yaw      : %+10.4f deg\n", st.calib_final.abv_yaw   / DEG);
+    std::printf("  杆臂   lvOD     : (%+8.4f, %+8.4f, %+8.4f) m\n",
+                st.calib_final.lvOD.i, st.calib_final.lvOD.j, st.calib_final.lvOD.k);
+    std::printf("  航向偏置        : %+10.4f deg\n", st.calib_final.yaw_gnss_offset / DEG);
 
     st.n_kf       = static_cast<int>(frames.size());
     st.total_time = raw.back().t - raw.front().t;

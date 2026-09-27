@@ -537,6 +537,40 @@ struct OdoMeas {
     double dt{0.0};
 };
 
+
+/* ============================================================================
+ * 全局标定状态（滑窗内所有帧共享同一份，不随时间变化）
+ *
+ * 参数：sodo, abv_pitch, abv_yaw, lvOD(3), yaw_gnss_offset
+ * 参数化：全部加性，无需流形
+ * 数据布局：calib[0..6] = {sodo, ap, ay, lx, ly, lz, yoff}
+ * ==========================================================================*/
+
+struct CalibState {
+    double sodo{0.0};             /*< 里程计刻度因子误差 */
+    double abv_pitch{0.0};        /*< 里程计安装俯仰角 (rad) */
+    double abv_yaw{0.0};          /*< 里程计安装偏航角 (rad) */
+    vect3  lvOD{0.0, 0.0, 0.0};   /*< 里程计杆臂 (b 系，m) */
+    double yaw_gnss_offset{0.0};  /*< 双天线航向偏置 (rad) */
+
+    void toData(double *d) const {
+        d[0] = sodo;
+        d[1] = abv_pitch;
+        d[2] = abv_yaw;
+        d[3] = lvOD.i;
+        d[4] = lvOD.j;
+        d[5] = lvOD.k;
+        d[6] = yaw_gnss_offset;
+    }
+    void fromData(const double *d) {
+        sodo            = d[0];
+        abv_pitch       = d[1];
+        abv_yaw         = d[2];
+        lvOD            = vect3(d[3], d[4], d[5]);
+        yaw_gnss_offset = d[6];
+    }
+};
+
 /* 一个关键帧 ----------------------------------------------------------------------*/
 struct Frame {
     double time{0.0};
@@ -929,6 +963,9 @@ public:
         bool   whiten_preint     = false;/*< 预积分残差按协方差白化（默认关，见 RunnerOptions） */
         bool   bias_jac          = false;/*< 残差里用零偏一阶雅可比（默认关，见 RunnerOptions） */
         int    min_frames_solve  = 2;    /*< 达到该帧数即开始求解（消除冷启动纯外推） */
+        /* 标定模式：true 时把标定参数块作为自由变量参与优化；
+         * false（导航模式）时固定标定参数块。 */
+        bool   calib_mode = false;
         vect3  odo_abv{0.0, 0.0, 0.0};    /*< 安装角 [pitch, 0, yaw]，rad */
         vect3  odo_lvOD{0.0, 0.0, 0.0};   /*< 杆臂（b 系，m） */
     };
@@ -950,6 +987,11 @@ public:
     bool  hasPrior(void) const { return J_prior_.row > 0; }
     void  clearPrior(void) { J_prior_ = mat(); r_prior_ = vect(); }
 
+    void setCalibState(const CalibState &c) { c.toData(calib_data_.data()); }
+    CalibState getCalibState() const {
+        CalibState c; c.fromData(calib_data_.data()); return c;
+    }
+
 private:
     /* 组装 Ceres 问题：把 frames 的所有因子加进去 */
     void buildProblem(ceres::Problem &problem,
@@ -966,6 +1008,7 @@ private:
     Options opt_;
     mat  J_prior_;   /*< 上一次边缘化的先验信息矩阵 */
     vect r_prior_;   /*< 上一次边缘化的先验信息向量 */
+    std::array<double, NUM_CALIB> calib_data_{};
 
 public:
     /* 求解统计（供上层评估计算量与收敛性） */
@@ -974,6 +1017,7 @@ public:
     int    stat_iterations{0};   /*< 迭代次数累计 */
     double stat_time_s{0.0};     /*< 求解累计耗时 (s) */
     std::string last_message;    /*< 最近一次求解的结束信息 */
+    
 };
 
 struct DataSensor281_t {
@@ -1066,7 +1110,7 @@ struct RunnerOptions {
      * yaw_offset 是天线安装角（rad），等价于原工程的 conf_GNSSAgle。 */
     /* 默认 FB_F：与 ipos3g_cmake/src/nav.cpp 里这台设备的配置一致
      * （configPara.ant_mode = Ant_Mode_FB_F, conf_GNSSAgle = 0）。 */
-    int    ant_mode           = ANT_MODE_LR_L;  /*< AntMode，见上 */
+    int    ant_mode           = ANT_MODE_LR_R;  /*< AntMode，见上 */
     double yaw_offset         = 0.0;   /*< 天线安装角 (rad) */
     bool   init_yaw_from_gnss = true;  /*< 初始姿态用双天线航向（不再固定 yaw0=0） */
 
@@ -1099,6 +1143,9 @@ struct RunnerOptions {
     /* 每帧对比 CSV 输出（空则不输出） */
     std::string compare_csv_path;
 
+    /* ---- 标定 ---- */
+    bool       calib_mode{false};  /*< true: 标定模式; false: 导航模式 */
+    CalibState calib_init{};       /*< 标定参数初值（标定/导航均可设） */
 };
 
 struct RunnerStats {
@@ -1107,7 +1154,6 @@ struct RunnerStats {
     int    n_kf_total     = 0;      /*< 累计处理的关键帧 */
     int    n_gnss_used    = 0;
     int    n_static_frames = 0;
-    int    n_odo_used     = 0;
     double total_time     = 0.0;
     double final_cost     = 0.0;
 
@@ -1140,6 +1186,9 @@ struct RunnerStats {
     int    n_solve       = 0;
     int    n_solve_ok    = 0;
     int    n_solve_iter  = 0;
+
+    CalibState calib_final{};   /*< 优化结束时的标定参数 */
+    int    n_odo_used     = 0;      /*< 进入因子的里程计观测数 */
 
     std::vector<FrameCompare> per_kf;   /* ← 新增 */
     std::map<double, size_t>  per_kf_time_to_idx;            /* ← 新增：时间→下标 */
