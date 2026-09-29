@@ -18,6 +18,7 @@ endif()
 # ---------------------------------------------------------------------------
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 find_package(Ceres REQUIRED)
+find_package(OpenCV REQUIRED)
 
 # ---------------------------------------------------------------------------
 # 算法库
@@ -26,6 +27,9 @@ add_library(ipos3_opt_lib STATIC src/alg_lib.cpp)
 target_include_directories(ipos3_opt_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # target_include_directories(ipos3_opt_lib PUBLIC <CERES_SOURCE>/internal/ceres/miniglog)
 target_link_libraries(ipos3_opt_lib PUBLIC Eigen3::Eigen)
+# OpenCV：用 PUBLIC，让依赖它的可执行目标自动继承包含路径
+target_include_directories(ipos3_opt_lib PUBLIC ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(ipos3_opt_lib PUBLIC ${OpenCV_LIBS})
 
 if(TARGET Ceres::ceres)
     target_link_libraries(ipos3_opt_lib PUBLIC Ceres::ceres)
@@ -52,6 +56,9 @@ target_link_libraries(test_ma PRIVATE ipos3_opt_lib)
 
 add_executable(test_marg test/test_marg.cpp)
 target_link_libraries(test_marg PRIVATE ipos3_opt_lib)
+
+add_executable(test_visual test/test_visual.cpp)
+target_link_libraries(test_visual PRIVATE ipos3_opt_lib)
 
 #add_executable(test_flow test/test_flow.cpp)
 #target_link_libraries(test_flow PRIVATE ipos3_opt_lib)

@@ -1240,22 +1240,23 @@ double trace(const mat3 &m) { return m.e().trace(); }
 double det(const mat3 &m) { return m.e().determinant(); }
 
 mat3 adj(const mat3 &m) {
-#if EIGEN_VERSION_AT_LEAST(3, 4, 0)
-    return mat3(Eigen::Matrix3d(m.e().adjugate()));
-#else
-    const Eigen::Matrix3d &A = m.e();
-    Eigen::Matrix3d adj;
-    adj(0,0) = A(1,1)*A(2,2) - A(1,2)*A(2,1);
-    adj(0,1) = A(0,2)*A(2,1) - A(0,1)*A(2,2);
-    adj(0,2) = A(0,1)*A(1,2) - A(0,2)*A(1,1);
-    adj(1,0) = A(1,2)*A(2,0) - A(1,0)*A(2,2);
-    adj(1,1) = A(0,0)*A(2,2) - A(0,2)*A(2,0);
-    adj(1,2) = A(0,2)*A(1,0) - A(0,0)*A(1,2);
-    adj(2,0) = A(1,0)*A(2,1) - A(1,1)*A(2,0);
-    adj(2,1) = A(0,1)*A(2,0) - A(0,0)*A(2,1);
-    adj(2,2) = A(0,0)*A(1,1) - A(0,1)*A(1,0);
-    return mat3(adj);
-#endif
+    /* 不用 Eigen 的 adjugate()：
+     *   1) 它靠 EIGEN_MATRIXBASE_PLUGIN 注入到 MatrixBase，
+     *      对 Map<> 类型的可见性在不同 3.4.x 版本/包含顺序下不一致；
+     *   2) 3x3 伴随矩阵直接展开也就 9 个乘减，没必要依赖库实现。
+     * 伴随矩阵定义：A·adj(A) = det(A)·I，元素为代数余子式的转置。 */
+    const Eigen::Matrix3d A = m.e();     /* Map -> 具体矩阵（列主序也可） */
+    Eigen::Matrix3d a;
+    a(0,0) = A(1,1)*A(2,2) - A(1,2)*A(2,1);
+    a(0,1) = A(0,2)*A(2,1) - A(0,1)*A(2,2);
+    a(0,2) = A(0,1)*A(1,2) - A(0,2)*A(1,1);
+    a(1,0) = A(1,2)*A(2,0) - A(1,0)*A(2,2);
+    a(1,1) = A(0,0)*A(2,2) - A(0,2)*A(2,0);
+    a(1,2) = A(0,2)*A(1,0) - A(0,0)*A(1,2);
+    a(2,0) = A(1,0)*A(2,1) - A(1,1)*A(2,0);
+    a(2,1) = A(0,1)*A(2,0) - A(0,0)*A(2,1);
+    a(2,2) = A(0,0)*A(1,1) - A(0,1)*A(1,0);
+    return mat3(a);
 }
 
 mat3 inv(const mat3 &m) { return mat3(m.e().inverse()); }
@@ -2511,6 +2512,177 @@ bool MarginalizationInfo::marginalize(int num_marginalized) {
     return true;
 }
 
+/* ============================================================================
+ * VisualFrontend 实现
+ * ==========================================================================*/
+VisualFrontend::VisualFrontend(const CameraModel& cam, int max_feat, int min_dist)
+    : cam_(cam), max_feat_(max_feat), min_dist_(min_dist) {}
+
+std::vector<TrackedFeature> VisualFrontend::process(double /*t*/, const cv::Mat& gray) {
+    std::vector<TrackedFeature> result;
+    std::vector<cv::Point2f>    cur_pts;
+    std::vector<int>            cur_ids, cur_cnt;
+
+    if (first_frame_) {
+        cv::Mat mask(gray.size(), CV_8UC1, cv::Scalar(255));
+        cv::goodFeaturesToTrack(gray, cur_pts, max_feat_, 0.01, min_dist_, mask);
+        for (size_t i = 0; i < cur_pts.size(); ++i) {
+            cur_ids.push_back(next_id_++);
+            cur_cnt.push_back(1);
+        }
+        first_frame_ = false;
+    } else {
+        /* LK 前向追踪 */
+        std::vector<uchar> status; std::vector<float> err;
+        cv::calcOpticalFlowPyrLK(prev_img_, gray, prev_pts_, cur_pts,
+                                 status, err, cv::Size(21,21), 3,
+                                 cv::TermCriteria(cv::TermCriteria::COUNT +
+                                                  cv::TermCriteria::EPS, 30, 0.01),
+                                 0);
+
+        /* 反向追踪做前后向校验 */
+        std::vector<cv::Point2f> back_pts;
+        std::vector<uchar> back_status; std::vector<float> back_err;
+        cv::calcOpticalFlowPyrLK(gray, prev_img_, cur_pts, back_pts,
+                                 back_status, back_err, cv::Size(21,21), 3,
+                                 cv::TermCriteria(cv::TermCriteria::COUNT +
+                                                  cv::TermCriteria::EPS, 30, 0.01), 0);
+
+        for (size_t i = 0; i < cur_pts.size(); ++i) {
+            if (!status[i]) continue;
+            const double dx = back_pts[i].x - prev_pts_[i].x;
+            const double dy = back_pts[i].y - prev_pts_[i].y;
+            if (dx*dx + dy*dy > 0.25) status[i] = 0;   /* 0.5 px 阈值 */
+        }
+
+        /* RANSAC F 矩阵剔除 */
+        rejectWithF(prev_pts_, cur_pts, status);
+
+        std::vector<cv::Point2f> kept_pts;
+        for (size_t i = 0; i < cur_pts.size(); ++i) {
+            if (!status[i]) continue;
+            kept_pts.push_back(cur_pts[i]);
+            cur_ids.push_back(prev_ids_[i]);
+            cur_cnt.push_back(track_cnt_[i] + 1);
+        }
+
+        /* 用 mask 补足新点 */
+        cv::Mat mask = makeMask(kept_pts);
+        const int need = max_feat_ - static_cast<int>(kept_pts.size());
+        if (need > 0) {
+            std::vector<cv::Point2f> new_pts;
+            cv::goodFeaturesToTrack(gray, new_pts, need, 0.01, min_dist_, mask);
+            for (const auto& p : new_pts) {
+                kept_pts.push_back(p);
+                cur_ids.push_back(next_id_++);
+                cur_cnt.push_back(1);
+            }
+        }
+        cur_pts = std::move(kept_pts);
+    }
+
+    result.reserve(cur_pts.size());
+    for (size_t i = 0; i < cur_pts.size(); ++i) {
+        TrackedFeature tf;
+        tf.feat_id   = cur_ids[i];
+        tf.pt        = cur_pts[i];
+        tf.xyz_c     = undistortToNorm(cur_pts[i]);
+        tf.track_cnt = cur_cnt[i];
+        result.push_back(tf);
+    }
+
+    prev_img_  = gray.clone();
+    prev_pts_  = std::move(cur_pts);
+    prev_ids_  = std::move(cur_ids);
+    track_cnt_ = std::move(cur_cnt);
+    return result;
+}
+
+cv::Mat VisualFrontend::makeMask(const std::vector<cv::Point2f>& pts) const {
+    cv::Mat mask(prev_img_.size(), CV_8UC1, cv::Scalar(255));
+    for (const auto& p : pts) cv::circle(mask, p, min_dist_, cv::Scalar(0), -1);
+    return mask;
+}
+
+void VisualFrontend::rejectWithF(const std::vector<cv::Point2f>& p0,
+                                 const std::vector<cv::Point2f>& p1,
+                                 std::vector<uchar>& status) {
+    if (p0.size() < 8) return;
+    std::vector<cv::Point2f> p0_in, p1_in; std::vector<int> idx;
+    for (size_t i = 0; i < status.size(); ++i) {
+        if (status[i]) { p0_in.push_back(p0[i]); p1_in.push_back(p1[i]);
+                         idx.push_back((int)i); }
+    }
+    if (p0_in.size() < 8) return;
+
+    std::vector<uchar> fmask;
+    cv::findFundamentalMat(p0_in, p1_in, cv::FM_RANSAC, 1.0, 0.99, fmask);
+    if (fmask.empty()) return;   /* F 矩阵退化，放弃剔除 */
+
+    /* 统计内点数：太少说明几何退化（纯平移/纯旋转），F 不可信 */
+    int inliers = 0;
+    for (uchar v : fmask) if (v) inliers++;
+    if (inliers < 8) return;
+
+    for (size_t k = 0; k < fmask.size(); ++k)
+        if (!fmask[k]) status[idx[k]] = 0;
+}
+
+Eigen::Vector3d VisualFrontend::undistortToNorm(const cv::Point2f& pt) const {
+    std::vector<cv::Point2f> in{pt}, out;
+    cv::undistortPoints(in, out, cam_.K(), cam_.D());
+    return Eigen::Vector3d(out[0].x, out[0].y, 1.0);
+}
+
+/* ============================================================================
+ * 离线预处理：把图像目录跑一遍前端，生成时间戳 -> VisualObs 表
+ * ==========================================================================*/
+std::map<double, std::vector<VisualObs>>
+preprocessImages(const std::string& cam_dir,
+                 const CameraModel& cam,
+                 double visual_sigma,
+                 int    max_feat,
+                 int    min_dist) {
+    namespace fs = std::filesystem;
+    std::map<double, std::vector<VisualObs>> table;
+    std::vector<std::string> files;
+    for (const auto& e : fs::directory_iterator(cam_dir)) {
+        auto ext = e.path().extension().string();
+        if (ext == ".png" || ext == ".jpg") files.push_back(e.path().string());
+    }
+    std::sort(files.begin(), files.end());
+    if (files.empty()) {
+        std::fprintf(stderr, "[visual] %s 下没有图像\n", cam_dir.c_str());
+        return table;
+    }
+
+    VisualFrontend frontend(cam, max_feat, min_dist);
+    for (const auto& f : files) {
+        const std::string stem = fs::path(f).stem().string();
+        double t_ns = 0.0;
+        try { t_ns = std::stod(stem); } catch (...) { continue; }
+        const double t = t_ns * 1e-9;   /* 纳秒 -> 秒 */
+
+        cv::Mat img = cv::imread(f, cv::IMREAD_GRAYSCALE);
+        if (img.empty()) continue;
+        auto feats = frontend.process(t, img);
+
+        std::vector<VisualObs> obs;
+        obs.reserve(feats.size());
+        for (const auto& tf : feats) {
+            if (tf.track_cnt < 2) continue;   /* 只保留稳定追踪点 */
+            VisualObs vo;
+            vo.feat_id = tf.feat_id;
+            vo.xyz_c   = vect3(tf.xyz_c(0), tf.xyz_c(1), 1.0);
+            vo.sigma   = visual_sigma;
+            obs.push_back(vo);
+        }
+        table[t] = std::move(obs);
+    }
+    std::printf("[visual] 预处理 %zu 帧图像, 表大小 %zu\n",
+                files.size(), table.size());
+    return table;
+}
 
 /* ============================================================================
  * GraphOptimizer::buildProblem
@@ -2520,6 +2692,7 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
                                   const vect3 &g_n) {
     /* ---- 0) 标定参数块（全局，窗口内共享） ---- */
     problem.AddParameterBlock(calib_data_.data(), NUM_CALIB);
+    problem.SetManifold(calib_data_.data(), new CalibManifold());
     if (!opt_.calib_mode) {
         problem.SetParameterBlockConstant(calib_data_.data());   /* 导航模式：固定 */
     }
@@ -2588,6 +2761,45 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
         problem.AddResidualBlock(cost, nullptr,
                                  f.pose.data(), f.mix.data(),
                                  calib_data_.data());
+    }
+
+    if (opt_.use_visual) {
+        std::unordered_map<int, std::vector<std::pair<int, const VisualObs*>>> obs_map;
+        for (int k = 0; k < (int)frames.size(); ++k)
+            for (const auto& vo : frames[k].visual_obs)
+                obs_map[vo.feat_id].emplace_back(k, &vo);
+
+        for (auto& kv : obs_map) {
+            const int fid = kv.first;
+            auto& obs_list = kv.second;
+            if (obs_list.size() < 2) continue;
+
+            auto it = inv_depths_.find(fid);
+            if (it == inv_depths_.end()) { inv_depths_[fid] = 0.1; it = inv_depths_.find(fid); }
+            double* inv_depth = &(it->second);
+
+            problem.AddParameterBlock(inv_depth, 1);
+            problem.SetParameterLowerBound(inv_depth, 0, opt_.inv_depth_min);
+            problem.SetParameterUpperBound(inv_depth, 0, opt_.inv_depth_max);
+
+            const int        ai = obs_list.front().first;
+            const VisualObs* a  = obs_list.front().second;
+            for (size_t m = 1; m < obs_list.size(); ++m) {
+                const int        ci = obs_list[m].first;
+                const VisualObs* c  = obs_list[m].second;
+                const double     sigma = std::max(a->sigma, c->sigma);
+
+                /* 注意：不再用 AutoDiffCostFunction 包装，直接 new VisualReprojResidual */
+                auto* cost = new VisualReprojResidual(a->xyz_c, c->xyz_c, sigma);
+                auto* loss = new ceres::HuberLoss(opt_.visual_huber);
+                problem.AddResidualBlock(
+                    cost, loss,
+                    frames[ai].pose.data(),
+                    frames[ci].pose.data(),
+                    calib_data_.data(),
+                    inv_depth);
+            }
+        }
     }
 }
 
@@ -2877,10 +3089,22 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
     gopt_opt.odo_abv        = opt.odo_abv;
     gopt_opt.odo_lvOD       = opt.odo_lvOD;
     gopt_opt.calib_mode     = opt.calib_mode;   // ← 补这一行
+    gopt_opt.use_visual    = opt.use_visual;
+    gopt_opt.visual_sigma  = opt.visual_sigma;
+    gopt_opt.visual_huber  = opt.visual_huber;
+    gopt_opt.inv_depth_min = 1.0 / 500.0;
+    gopt_opt.inv_depth_max = 1.0 / 0.5;
+
     if (const char *it = std::getenv("IPOS3_MAX_ITER")) {
         gopt_opt.max_iterations = std::atoi(it);
     }
     GraphOptimizer gopt(gopt_opt);
+
+    std::map<double, std::vector<VisualObs>> visual_table;
+    if (opt.use_visual && !opt.cam_dir.empty()) {
+        visual_table = preprocessImages(opt.cam_dir, opt.cam_model,
+                                        opt.visual_sigma);
+    }
 
     /* 标定参数初值（标定与导航通用） */
     CalibState calib = opt.calib_init;
@@ -3177,6 +3401,27 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
             fk.odo_omega_meas = vect3(s.wm[0] / dt, s.wm[1] / dt, s.wm[2] / dt);
             fk.odo_std        = opt.odo_vel_scale * opt.odo_vel_std;
             st.n_odo_used++;
+        }
+
+        /* ---- 视觉观测：按最近邻时间戳匹配 ---- */
+        if (opt.use_visual && !visual_table.empty()) {
+            auto it = visual_table.lower_bound(s.t);
+            double best_dt = 1e9;
+            const std::vector<VisualObs>* best = nullptr;
+            if (it != visual_table.end()) {
+                best_dt = it->first - s.t;
+                best    = &it->second;
+            }
+            if (it != visual_table.begin()) {
+                auto it2 = std::prev(it);
+                if (s.t - it2->first < best_dt) {
+                    best_dt = s.t - it2->first;
+                    best    = &it2->second;
+                }
+            }
+            if (best && best_dt < 0.05) {   /* 50 ms 内有效 */
+                fk.visual_obs = *best;
+            }
         }
 
         /* 4.6 挂预积分：用 frames.back() 而不是 fprev */

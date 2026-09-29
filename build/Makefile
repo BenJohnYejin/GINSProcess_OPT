@@ -111,6 +111,19 @@ depend:
 .PHONY : depend
 
 #=============================================================================
+# Target rules for targets named test_visual
+
+# Build rule for target.
+test_visual: cmake_check_build_system
+	$(MAKE) -f CMakeFiles/Makefile2 test_visual
+.PHONY : test_visual
+
+# fast build rule for target.
+test_visual/fast:
+	$(MAKE) -f CMakeFiles/test_visual.dir/build.make CMakeFiles/test_visual.dir/build
+.PHONY : test_visual/fast
+
+#=============================================================================
 # Target rules for targets named test_marg
 
 # Build rule for target.
@@ -350,6 +363,33 @@ test/test_pre.cpp.s:
 	$(MAKE) -f CMakeFiles/test_pre.dir/build.make CMakeFiles/test_pre.dir/test/test_pre.cpp.s
 .PHONY : test/test_pre.cpp.s
 
+test/test_visual.o: test/test_visual.cpp.o
+
+.PHONY : test/test_visual.o
+
+# target to build an object file
+test/test_visual.cpp.o:
+	$(MAKE) -f CMakeFiles/test_visual.dir/build.make CMakeFiles/test_visual.dir/test/test_visual.cpp.o
+.PHONY : test/test_visual.cpp.o
+
+test/test_visual.i: test/test_visual.cpp.i
+
+.PHONY : test/test_visual.i
+
+# target to preprocess a source file
+test/test_visual.cpp.i:
+	$(MAKE) -f CMakeFiles/test_visual.dir/build.make CMakeFiles/test_visual.dir/test/test_visual.cpp.i
+.PHONY : test/test_visual.cpp.i
+
+test/test_visual.s: test/test_visual.cpp.s
+
+.PHONY : test/test_visual.s
+
+# target to generate assembly for a file
+test/test_visual.cpp.s:
+	$(MAKE) -f CMakeFiles/test_visual.dir/build.make CMakeFiles/test_visual.dir/test/test_visual.cpp.s
+.PHONY : test/test_visual.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -358,6 +398,7 @@ help:
 	@echo "... depend"
 	@echo "... rebuild_cache"
 	@echo "... edit_cache"
+	@echo "... test_visual"
 	@echo "... test_marg"
 	@echo "... test_ma"
 	@echo "... test_pre"
@@ -382,6 +423,9 @@ help:
 	@echo "... test/test_pre.o"
 	@echo "... test/test_pre.i"
 	@echo "... test/test_pre.s"
+	@echo "... test/test_visual.o"
+	@echo "... test/test_visual.i"
+	@echo "... test/test_visual.s"
 .PHONY : help
 
 

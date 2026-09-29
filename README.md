@@ -828,3 +828,565 @@ $$
 5. **整体优化**：MAP 估计 (X.76)、整体残差 (X.78)、LM 迭代 (X.79)。
 
 该框架在流形上统一处理旋转，利用 Ceres AutoDiff 自动求导，通过滑窗与边缘化实现固定计算量的实时估计。
+# 第X章 里程计与双天线航向联合在线标定理论
+
+## X.1 引言
+
+在GNSS/INS/里程计多源融合导航系统中，各传感器之间的安装关系是影响融合精度的关键因素。里程计的刻度因子、安装角与杆臂，以及双天线GNSS基线相对IMU机体系的航向安装偏置，均属于硬件安装决定的常量参数。这些参数若存在标定误差，将直接引入系统性偏差，降低组合导航的精度与可靠性。
+
+传统的标定方法通常将里程计标定与双天线航向标定分离处理，或采用卡尔曼滤波框架进行序贯估计。前者忽略了各标定量之间通过共享状态变量相互耦合的信息，后者受限于单步观测，无法充分利用多帧历史信息进行联合优化。此外，现有方法中，标定过程与导航过程通常采用分离的架构，需维护两套代码分支，工程实现复杂。
+
+本章建立滑窗图优化框架下的里程计与双天线航向联合在线标定理论。首先给出标定问题的一般描述与参数块划分准则；其次分别推导里程计速度因子与双天线航向因子的残差模型及其对各标定参数的雅可比；然后给出全局法方程累积与Levenberg-Marquardt迭代更新公式；最后分析各标定参数的可观测性条件。
+
+## X.2 标定问题描述与参数块划分
+
+### X.2.1 标定量的物理含义
+
+本程序需要标定的物理量分为两类。第一类为里程计参数，包括刻度因子误差$s$、安装角$\boldsymbol\alpha=[\alpha_p,0,\alpha_y]^T$以及杆臂$\mathbf l_{\text{OD}}$。第二类为双天线航向偏置$\psi_{\text{off}}$，其定义为双天线基线方向相对IMU机体系前向轴的安装夹角。这些量具有如下共同特征：
+
+（1）物理上不随时间变化，是硬件安装决定的常量；
+
+（2）在所有关键帧上共享同一组取值；
+
+（3）不出现在逐帧状态中，但仍以全局参数块的形式参与优化。
+
+### X.2.2 状态变量与全局标定参数
+
+定义滑窗内第$k$个关键帧的状态为
+
+$$
+x_k=(p_k,\ q_k,\ v_k,\ b_{g,k},\ b_{a,k})\in\mathbb R^3\times S^3\times\mathbb R^3\times\mathbb R^3\times\mathbb R^3
+\tag{X.1}
+$$
+
+其中$p_k$为局部ENU位置，$q_k$为$b\to n$姿态四元数，$v_k$为ENU速度，$b_{g,k}$与$b_{a,k}$分别为陀螺零偏与加表零偏。
+
+定义全局标定向量为
+
+$$
+c=(s,\ \alpha_p,\ \alpha_y,\ \mathbf l_{\text{OD}},\ \psi_{\text{off}})\in\mathbb R^7
+\tag{X.2}
+$$
+
+其数据布局为
+
+$$
+c[0..6]=\big(s,\ \alpha_p,\ \alpha_y,\ l_x,\ l_y,\ l_z,\ \psi_{\text{off}}\big)
+\tag{X.3}
+$$
+
+各分量的物理含义与维数如表X.1所示。
+
+**表X.1 全局标定参数一览**
+
+| 符号 | 含义 | 维数 |
+|---|---|---|
+| $s$ | 里程计刻度因子误差 | 1 |
+| $\alpha_p$ | 里程计安装俯仰角 | 1 |
+| $\alpha_y$ | 里程计安装偏航角 | 1 |
+| $\mathbf l_{\text{OD}}$ | 里程计杆臂（机体系） | 3 |
+| $\psi_{\text{off}}$ | 双天线航向偏置 | 1 |
+
+标定参数采用加性参数化，无需流形结构，切空间维数等于环境维数7。
+
+### X.2.3 参数块划分准则
+
+图优化中，参数块的划分应遵循以下准则：
+
+（1）逐帧状态用于描述随时间变化的位姿、速度与零偏；
+
+（2）全局参数用于描述不随时间变化的硬件常量；
+
+（3）一个参数能否被优化，取决于残差函数是否引用该参数块，以及残差对该参数块的雅可比是否非零，与该参数是否属于"状态"无关。
+
+参数块的生命周期与边缘化处理如表X.2所示。
+
+**表X.2 参数块划分与生命周期**
+
+| 参数块 | 物理含义 | 生命周期 | 边缘化处理 |
+|---|---|---|---|
+| 逐帧状态$x_k$ | 随时间变化的量 | 帧在窗口内 | 消去 |
+| 全局标定$c$ | 硬件决定的常量 | 整个会话 | 不消去 |
+
+**命题X.1（标定参数的可优化条件）** 标定参数可作为全局参数块被优化，当且仅当存在至少一个残差函数引用了该参数块，并且残差对该参数块的雅可比非零。
+
+**证明** 见X.5节法方程累积过程。由式(X.40)可知，若某标定参数$c_i$未出现在任何残差函数中，则$H_{cc}$的第$i$行第$i$列为零，法方程对应的右端项$b_c$的第$i$个分量也为零。此时Levenberg-Marquardt迭代的增量$\delta c_i$恒为零，参数保持初值不变。反之，若存在残差引用该参数且雅可比非零，则$H_{cc}$的第$i$个对角元非零，$\delta c_i$由法方程解出。证毕。
+
+## X.3 里程计速度因子
+
+### X.3.1 里程计测量模型
+
+里程计只测量沿其安装方向$x_m$的位移增量$dS$。定义里程计坐标系$m$，其$x_m$轴沿前进方向。里程计在$m$系下的位移向量为
+
+$$
+\Delta\mathbf s^{m}=\big(dS,\ 0,\ 0\big)^T
+\tag{X.4}
+$$
+
+设里程计真实位移与测量位移的关系为
+
+$$
+dS_{\text{true}}=(1+s)\,dS_{\text{meas}}
+\tag{X.5}
+$$
+
+其中$s$为刻度因子误差。
+
+### X.3.2 安装角与坐标变换
+
+安装角$\boldsymbol\alpha=[\alpha_p,0,\alpha_y]^T$给出$m\to b$的旋转矩阵
+
+$$
+C_b^m(\boldsymbol\alpha)=
+\begin{bmatrix}
+\cos\alpha_y\cos\alpha_p & \sin\alpha_y & \cos\alpha_y\sin\alpha_p\\
+-\sin\alpha_y\cos\alpha_p & \cos\alpha_y & -\sin\alpha_y\sin\alpha_p\\
+-\sin\alpha_p & 0 & \cos\alpha_p
+\end{bmatrix}
+\tag{X.6}
+$$
+
+将里程计位移从$m$系转到$b$系：
+
+$$
+\Delta\mathbf s^{b}=C_b^m(\boldsymbol\alpha)\,\Delta\mathbf s^{m}=(1+s)\,dS\,\mathbf c_x(\boldsymbol\alpha)
+\tag{X.7}
+$$
+
+其中定义方向单位向量
+
+$$
+\mathbf c_x(\boldsymbol\alpha)\triangleq C_b^m(\boldsymbol\alpha)\,\mathbf e_x=
+\begin{bmatrix}
+\cos\alpha_y\cos\alpha_p\\
+-\sin\alpha_y\cos\alpha_p\\
+-\sin\alpha_p
+\end{bmatrix}
+\tag{X.8}
+$$
+
+### X.3.3 杆臂补偿
+
+里程计安装在机体系$\mathbf l_{\text{OD}}$处。该点的速度与IMU中心速度的关系为
+
+$$
+\mathbf v_{\text{OD}}^{b}=\mathbf v^{b}+\boldsymbol\omega_{ib}^{b}\times\mathbf l_{\text{OD}}
+\tag{X.9}
+$$
+
+其中$\boldsymbol\omega_{ib}^{b}$为陀螺测量的角速度（已去零偏）。
+
+### X.3.4 里程计速度观测方程
+
+合并式(X.7)与(X.9)，里程计在机体系下的速度估计为
+
+$$
+\mathbf v_{\text{odo}}^{b}=(1+s)\frac{dS}{dt}\,\mathbf c_x(\boldsymbol\alpha)
++\boldsymbol\omega_{ib}^{b}\times\mathbf l_{\text{OD}}
+\tag{X.10}
+$$
+
+转到导航系，得到观测方程
+
+$$
+\mathbf v_{\text{odo}}^{n}=R_b^n(q)\,\mathbf v_{\text{odo}}^{b}
+\tag{X.11}
+$$
+
+其中$R_b^n(q)$为机体系到导航系的旋转矩阵。
+
+### X.3.5 残差定义
+
+里程计因子将式(X.11)的估计与状态速度$v^n$比较，定义标准化残差
+
+$$
+\mathbf r_{\text{odo}}=
+\frac{1}{\sigma_{\text{odo}}}
+\Big(R_b^n(q)\,\mathbf v_{\text{odo}}^{b}-v^n\Big)
+\tag{X.12}
+$$
+
+残差依赖关系如下：
+
+（1）依赖第$k$帧状态$q_k,v_k,b_{g,k}$；
+
+（2）依赖全局标定参数$s,\alpha_p,\alpha_y,\mathbf l_{\text{OD}}$。
+
+### X.3.6 残差对各量的雅可比
+
+**（a）对安装角$\alpha_p,\alpha_y$**
+
+由式(X.8)求偏导，得到
+
+$$
+\frac{\partial\mathbf c_x}{\partial\alpha_p}=
+\begin{bmatrix}
+-\cos\alpha_y\sin\alpha_p\\
+\sin\alpha_y\sin\alpha_p\\
+-\cos\alpha_p
+\end{bmatrix},
+\qquad
+\frac{\partial\mathbf c_x}{\partial\alpha_y}=
+\begin{bmatrix}
+-\sin\alpha_y\cos\alpha_p\\
+-\cos\alpha_y\cos\alpha_p\\
+0
+\end{bmatrix}
+\tag{X.13}
+$$
+
+于是
+
+$$
+\frac{\partial\mathbf r_{\text{odo}}}{\partial\alpha_p}
+=
+\frac{1}{\sigma_{\text{odo}}}
+R_b^n\,(1+s)\frac{dS}{dt}\,
+\frac{\partial\mathbf c_x}{\partial\alpha_p}
+\tag{X.14}
+$$
+
+$$
+\frac{\partial\mathbf r_{\text{odo}}}{\partial\alpha_y}
+=
+\frac{1}{\sigma_{\text{odo}}}
+R_b^n\,(1+s)\frac{dS}{dt}\,
+\frac{\partial\mathbf c_x}{\partial\alpha_y}
+\tag{X.15}
+$$
+
+**（b）对刻度因子$s$**
+
+$$
+\frac{\partial\mathbf r_{\text{odo}}}{\partial s}
+=
+\frac{1}{\sigma_{\text{odo}}}
+R_b^n\,\frac{dS}{dt}\,\mathbf c_x(\boldsymbol\alpha)
+\tag{X.16}
+$$
+
+**（c）对杆臂$\mathbf l_{\text{OD}}$**
+
+$$
+\frac{\partial\mathbf r_{\text{odo}}}{\partial\mathbf l_{\text{OD}}}
+=
+\frac{1}{\sigma_{\text{odo}}}
+R_b^n\,[\boldsymbol\omega_{ib}^{b}]_\times
+\tag{X.17}
+$$
+
+其中$[\cdot]_\times$为反对称矩阵算子。
+
+**（d）对姿态$q_k$**
+
+设$q_k$右扰动为$q_k\otimes\text{Exp}(\delta\phi)$，则
+
+$$
+\frac{\partial R_b^n}{\partial\delta\phi}
+=
+-R_b^n\,[\mathbf v_{\text{odo}}^{b}]_\times
+\tag{X.18}
+$$
+
+于是
+
+$$
+\frac{\partial\mathbf r_{\text{odo}}}{\partial\delta\phi}
+=
+-\frac{1}{\sigma_{\text{odo}}}
+R_b^n\,[\mathbf v_{\text{odo}}^{b}]_\times
+\tag{X.19}
+$$
+
+**（e）对速度$v_k$**
+
+$$
+\frac{\partial\mathbf r_{\text{odo}}}{\partial v_k}
+=
+-\frac{1}{\sigma_{\text{odo}}}\,I_3
+\tag{X.20}
+$$
+
+**（f）对陀螺零偏$b_{g,k}$**
+
+由于$\boldsymbol\omega_{ib}^{b}=d\theta_m/dt-b_{g,k}$，代入得
+
+$$
+\frac{\partial\mathbf r_{\text{odo}}}{\partial b_{g,k}}
+=
+-\frac{1}{\sigma_{\text{odo}}}
+R_b^n\,[\mathbf l_{\text{OD}}]_\times
+\tag{X.21}
+$$
+
+## X.4 双天线航向因子
+
+### X.4.1 观测模型
+
+双天线GNSS给出的航向$\psi_{\text{gnss}}$是天线基线在ENU下的方位角。由于基线相对IMU机体系存在安装偏置$\psi_{\text{off}}$，观测方程为
+
+$$
+\psi_{\text{gnss}}=\text{yaw}(q)+\psi_{\text{off}}+n_\psi,
+\qquad n_\psi\sim\mathcal N(0,\sigma_\psi^2)
+\tag{X.22}
+$$
+
+### X.4.2 航向提取
+
+姿态四元数为$q=[q_0,q_1,q_2,q_3]=[w,x,y,z]$，对应旋转矩阵$R$。与姿态解算约定一致，航向定义为
+
+$$
+\text{yaw}(q)=\operatorname{atan2}(-R_{01},\ R_{11})
+\tag{X.23}
+$$
+
+用四元数表示：
+
+$$
+\text{yaw}(q)=\operatorname{atan2}\big(2(q_0q_3-q_1q_2),\ q_0^2-q_1^2+q_2^2-q_3^2\big)
+\tag{X.24}
+$$
+
+### X.4.3 残差定义
+
+定义标准化残差
+
+$$
+r_\psi=
+\frac{1}{\sigma_\psi}
+\operatorname{wrap}\big(\text{yaw}(q)+\psi_{\text{off}}-\psi_{\text{gnss}}\big)
+\tag{X.25}
+$$
+
+其中角度规整算子为
+
+$$
+\operatorname{wrap}(d)=\operatorname{atan2}(\sin d,\ \cos d)
+\tag{X.26}
+$$
+
+**说明**：式(X.26)使用$\operatorname{atan2}(\sin,\cos)$而非条件判断语句，是因为它对自动微分连续可导，可避免在角度跳变点处导数不连续。
+
+### X.4.4 残差对航向偏置的雅可比
+
+由式(X.25)直接求导：
+
+$$
+\frac{\partial r_\psi}{\partial\psi_{\text{off}}}=\frac{1}{\sigma_\psi}
+\tag{X.27}
+$$
+
+由式(X.27)可知，只要存在至少一帧有效航向观测，$\psi_{\text{off}}$就有非零梯度，即可被优化。
+
+### X.4.5 残差对姿态的雅可比
+
+设$q$右扰动为$q\otimes\text{Exp}(\delta\phi)$，则
+
+$$
+R'=R\big(I+[\delta\phi]_\times\big)
+\tag{X.28}
+$$
+
+记$N=-R_{01}$，$D=R_{11}$，$\text{yaw}=\operatorname{atan2}(N,D)$，由链式法则：
+
+$$
+\frac{\partial\text{yaw}}{\partial\delta\phi}
+=
+\frac{D\frac{\partial N}{\partial\delta\phi}-N\frac{\partial D}{\partial\delta\phi}}
+{D^2+N^2}
+\tag{X.29}
+$$
+
+在右扰动下
+
+$$
+\frac{\partial R(i,1)}{\partial\delta\phi}=\big(R(i,2),\ 0,\ -R(i,0)\big)
+\tag{X.30}
+$$
+
+因此
+
+$$
+\frac{\partial\text{yaw}}{\partial\delta\phi}
+=
+\frac{1}{R_{01}^2+R_{11}^2}
+\big(-R_{11}R_{02}+R_{01}R_{12},\ 0,\ R_{11}R_{00}-R_{01}R_{10}\big)
+\tag{X.31}
+$$
+
+将$R$的欧拉角展开式代入，可化简为
+
+$$
+\frac{\partial\text{yaw}}{\partial\delta\phi}
+=
+\left(
+-\frac{\tan(\text{roll})}{\cos(\text{pitch})},\
+0,\
+\frac{\cos(\text{roll})}{\cos(\text{pitch})}
+\right)
+\tag{X.32}
+$$
+
+于是
+
+$$
+\frac{\partial r_\psi}{\partial\delta\phi}
+=
+\frac{1}{\sigma_\psi}\cdot
+\frac{\partial\text{yaw}}{\partial\delta\phi}
+\tag{X.33}
+$$
+
+## X.5 全局法方程累积与迭代更新
+
+### X.5.1 法方程累积
+
+设滑窗内共有$N$帧。所有残差块累积到全局法方程：
+
+$$
+H=\sum_{k=1}^{N}J_k^TJ_k,\qquad
+b=\sum_{k=1}^{N}J_k^T\mathbf r_k
+\tag{X.34}
+$$
+
+按状态部分与标定部分分块：
+
+$$
+H=
+\begin{bmatrix}
+H_{xx} & H_{xc}\\
+H_{xc}^T & H_{cc}
+\end{bmatrix},\qquad
+b=
+\begin{bmatrix}
+b_x\\ b_c
+\end{bmatrix}
+\tag{X.35}
+$$
+
+### X.5.2 标定部分的信息矩阵
+
+由里程计与航向因子的雅可比累积得到
+
+$$
+H_{cc}=
+\sum_{k\in\mathcal O}
+\left(\frac{\partial\mathbf r_{\text{odo},k}}{\partial c}\right)^T
+\left(\frac{\partial\mathbf r_{\text{odo},k}}{\partial c}\right)
++
+\sum_{k\in\mathcal Y}
+\left(\frac{\partial r_{\psi,k}}{\partial c}\right)^T
+\left(\frac{\partial r_{\psi,k}}{\partial c}\right)
+\tag{X.36}
+$$
+
+其中$\mathcal O$为有里程计观测的帧集合，$\mathcal Y$为有航向观测的帧集合。
+
+由式(X.36)可见，$H_{cc}$是所有帧的雅可比平方和。即使单帧的雅可比很小，多帧累积后$H_{cc}$也能充分大，标定参数就可观。这是将标定量作为全局参数块共享的数学依据。
+
+### X.5.3 Schur补与边缘化处理
+
+当滑窗超限时，最旧帧的状态$x_0$通过Schur补从法方程中消去。对状态部分做Schur补，得到仅关于标定参数的等价法方程：
+
+$$
+\big(H_{cc}-H_{xc}^TH_{xx}^{-1}H_{xc}\big)\,\delta c
+=
+b_c-H_{xc}^TH_{xx}^{-1}b_x
+\tag{X.37}
+$$
+
+记
+
+$$
+H_{cc}^*=H_{cc}-H_{xc}^TH_{xx}^{-1}H_{xc}
+\tag{X.38}
+$$
+
+$$
+b_c^*=b_c-H_{xc}^TH_{xx}^{-1}b_x
+\tag{X.39}
+$$
+
+则标定参数的最优更新为
+
+$$
+\delta c=(H_{cc}^*+\lambda I)^{-1}\,b_c^*
+\tag{X.40}
+$$
+
+其中$\lambda$为Levenberg-Marquardt阻尼因子。
+
+**关键特征**：标定参数块$c$不参与边缘化，始终保留在优化变量集合中。这是由标定量的物理属性决定的：标定参数在整个会话中保持不变，不属于任何单一帧的状态，因此不随帧滑出而消去。
+
+### X.5.4 Levenberg-Marquardt迭代更新
+
+第$t$次迭代解线性方程
+
+$$
+(H+\lambda I)\begin{bmatrix}\delta x\\ \delta c\end{bmatrix}
+=
+-\begin{bmatrix}b_x\\ b_c\end{bmatrix}
+\tag{X.41}
+$$
+
+状态更新用流形加法：
+
+$$
+x^{(t+1)}=x^{(t)}\boxplus\delta x
+\tag{X.42}
+$$
+
+标定参数更新用加性：
+
+$$
+c^{(t+1)}=c^{(t)}+\delta c
+\tag{X.43}
+$$
+
+## X.6 标定模式与导航模式的统一
+
+### X.6.1 标定模式
+
+标定模式下标定参数块不被固定：
+
+```cpp
+problem.AddParameterBlock(calib_data_.data(), NUM_CALIB);
+if (!opt_.calib_mode) {
+    problem.SetParameterBlockConstant(calib_data_.data());
+}
+```
+
+## X.6 标定模式与导航模式的统一
+
+### X.6.1 标定模式
+
+标定模式下标定参数块不被固定。在程序实现中，先通过 `AddParameterBlock` 添加标定参数块，再通过 `calib_mode` 开关判断是否调用 `SetParameterBlockConstant`。当 `calib_mode` 为真时，不调用 `SetParameterBlockConstant`，标定参数块作为自由变量参与优化。此时标定参数与状态一起被优化：
+
+$$
+\min_{x,\, c} \; \sum_{k} \big\| \mathbf{r}_k(x, c) \big\|^2
+\tag{X.47}
+$$
+
+### X.6.2 导航模式
+
+导航模式下标定参数被固定为已知值 $c^{\star}$。当 `calib_mode` 为假时，程序调用 `SetParameterBlockConstant` 将标定参数块固定，作为常量参与残差计算：
+
+$$
+\min_{x} \; \sum_{k} \big\| \mathbf{r}_k(x, c^{\star}) \big\|^2
+\tag{X.48}
+$$
+
+因子仍然引用标定块（作为已知常量），但不更新。
+
+### X.6.3 数学上的统一性
+
+两种模式共用同一套残差函数，唯一差别是参数块是否进入优化变量集合。如表X.3所示。
+
+**表X.3 标定模式与导航模式的对比**
+
+| 模式 | 残差函数 | 标定块 | 优化变量 |
+|---|---|---|---|
+| 标定 | $\mathbf{r}_k(x, c)$ | 自由 | $x,\ c$ |
+| 导航 | $\mathbf{r}_k(x, c^{\star})$ | 固定 | $x$ |
+
+这一设计避免了维护两套代码分支，同一套因子函数在两种模式下都工作，仅通过参数块是否固定来区分，便于工程实现与维护。

@@ -48,6 +48,14 @@
 #include <Eigen/Eigenvalues>
 #include <ceres/ceres.h>
 
+#include <filesystem>                              // std::filesystem
+#include <opencv2/core.hpp>                        // cv::Mat / Point2f / TermCriteria / Scalar
+#include <opencv2/imgproc.hpp>                     // goodFeaturesToTrack / circle
+#include <opencv2/features2d.hpp>                  // (备用)
+#include <opencv2/video/tracking.hpp>              // calcOpticalFlowPyrLK / OPTFLOW_USE_INITIAL_FLOW
+#include <opencv2/calib3d.hpp>                     // findFundamentalMat / FM_RANSAC / undistortPoints
+#include <opencv2/imgcodecs.hpp>                   // imread / IMREAD_GRAYSCALE
+
 constexpr double const_sqrt(double x, double guess) {
     double r = guess;
     for (int i = 0; i < 60; i++) {
@@ -89,7 +97,10 @@ constexpr int NUM_STATE     = 15; /*< 预积分残差维数 */
 constexpr int NUM_STATE_ODO = 19; /*< 再加上里程位移(3) 与比例因子(1) */
 constexpr int NUM_NOISE     = 12; /*< IMU 噪声维数 */
 constexpr int NUM_NOISE_ODO = 16; /*< 再加上里程计白噪声(3) 与比例因子随机游走(1) */
-constexpr int NUM_CALIB     = 7;  /*< {sodo, abv_p, abv_y, lvOD_x, lvOD_y, lvOD_z, yaw_off} */
+constexpr int NUM_CALIB     = 14;  
+/* calib[0..6]  = {sodo, abv_p, abv_y, lvOD_x, lvOD_y, lvOD_z, yaw_off}
+ * calib[7..9]  = t_bc  (相机光心在 body 系下位置)
+ * calib[10..13] = q_bc (qx, qy, qz, qw)  camera -> body */
 
 static constexpr int STATE_DIM = NUM_STATE;  /*< 15 */
 static constexpr int NOISE_DIM = NUM_NOISE;  /*< 12 */
@@ -515,7 +526,6 @@ void accumulate_normal_equations(const mat &J, const vect &r, mat &H, vect &b);
  * 返回 false 表示维数非法或分解失败。 -------------------------------------------*/
 bool schur_complement(const mat &H, const vect &b, int num_marginalized, mat &J_out, vect &r_out);
 /* ============================ 坐标系 ============================ */
-
 mat3 pos2Cen(const vect3 &pos);
 vect3 xyz2blh(const vect3 &xyz);
 vect3 blh2xyz(const vect3 &blh);
@@ -680,6 +690,55 @@ struct OdoMeas {
     double dt{0.0};
 };
 
+/* ---- 归一化平面上的视觉观测（后端因子使用） ---- */
+struct VisualObs {
+    int    feat_id{0};
+    vect3  xyz_c{0.0, 0.0, 0.0};   /* (X/Z, Y/Z, 1) */
+    double sigma{1.5 / 460.0};
+};
+
+/* ---- 相机针孔模型 + 径向切向畸变 ---- */
+struct CameraModel {
+    double fx{0.0}, fy{0.0}, cx{0.0}, cy{0.0};
+    double k1{0.0}, k2{0.0}, p1{0.0}, p2{0.0};
+    cv::Mat K() const {
+        return (cv::Mat_<double>(3,3) << fx,0,cx, 0,fy,cy, 0,0,1);
+    }
+    cv::Mat D() const {
+        return (cv::Mat_<double>(1,4) << k1,k2,p1,p2);
+    }
+};
+
+/* ---- 单个被追踪特征 ---- */
+struct TrackedFeature {
+    int             feat_id{0};
+    cv::Point2f     pt{};
+    Eigen::Vector3d xyz_c{0,0,1};
+    int             track_cnt{1};
+};
+
+/* ---- 视觉前端（Shi-Tomasi + LK + RANSAC F）---- */
+class VisualFrontend {
+public:
+    VisualFrontend(const CameraModel& cam, int max_feat = 150, int min_dist = 20);
+    std::vector<TrackedFeature> process(double t, const cv::Mat& gray);
+    const CameraModel& camera() const { return cam_; }
+
+private:
+    cv::Mat makeMask(const std::vector<cv::Point2f>& pts) const;
+    void    rejectWithF(const std::vector<cv::Point2f>& p0,
+                        const std::vector<cv::Point2f>& p1,
+                        std::vector<uchar>& status);
+    Eigen::Vector3d undistortToNorm(const cv::Point2f& pt) const;
+
+    CameraModel cam_;
+    int         max_feat_, min_dist_;
+    cv::Mat                  prev_img_;
+    std::vector<cv::Point2f> prev_pts_;
+    std::vector<int>         prev_ids_, track_cnt_;
+    int                      next_id_{1};
+    bool                     first_frame_{true};
+};
 
 /* ============================================================================
  * 全局标定状态（滑窗内所有帧共享同一份，不随时间变化）
@@ -689,27 +748,27 @@ struct OdoMeas {
  * 数据布局：calib[0..6] = {sodo, ap, ay, lx, ly, lz, yoff}
  * ==========================================================================*/
 struct CalibState {
-    double sodo{0.0};             /*< 里程计刻度因子误差 */
-    double abv_pitch{0.0};        /*< 里程计安装俯仰角 (rad) */
-    double abv_yaw{0.0};          /*< 里程计安装偏航角 (rad) */
-    vect3  lvOD{0.0, 0.0, 0.0};   /*< 里程计杆臂 (b 系，m) */
-    double yaw_gnss_offset{0.0};  /*< 双天线航向偏置 (rad) */
+    double sodo{0.0};
+    double abv_pitch{0.0};
+    double abv_yaw{0.0};
+    vect3  lvOD{0.0, 0.0, 0.0};
+    double yaw_gnss_offset{0.0};
+    /* ---- 相机外参（新增） ---- */
+    vect3  t_bc{0.0, 0.0, 0.0};
+    quat   q_bc{1.0, 0.0, 0.0, 0.0};
 
     void toData(double *d) const {
-        d[0] = sodo;
-        d[1] = abv_pitch;
-        d[2] = abv_yaw;
-        d[3] = lvOD.i;
-        d[4] = lvOD.j;
-        d[5] = lvOD.k;
-        d[6] = yaw_gnss_offset;
+        d[0]=sodo; d[1]=abv_pitch; d[2]=abv_yaw;
+        d[3]=lvOD.i; d[4]=lvOD.j; d[5]=lvOD.k;
+        d[6]=yaw_gnss_offset;
+        d[7]=t_bc.i; d[8]=t_bc.j; d[9]=t_bc.k;
+        d[10]=q_bc.q1; d[11]=q_bc.q2; d[12]=q_bc.q3; d[13]=q_bc.q0;
     }
     void fromData(const double *d) {
-        sodo            = d[0];
-        abv_pitch       = d[1];
-        abv_yaw         = d[2];
-        lvOD            = vect3(d[3], d[4], d[5]);
-        yaw_gnss_offset = d[6];
+        sodo=d[0]; abv_pitch=d[1]; abv_yaw=d[2];
+        lvOD=vect3(d[3],d[4],d[5]); yaw_gnss_offset=d[6];
+        t_bc=vect3(d[7],d[8],d[9]);
+        q_bc=quat(d[13],d[10],d[11],d[12]);
     }
 };
 
@@ -762,6 +821,8 @@ struct Frame {
     double odo_dt{0.0};               /*< 对应时间间隔 (s) */
     vect3  odo_omega_meas{};          /*< 该段陀螺原始测量 (rad/s)，用于杆臂补偿 */
     double odo_std{0.05};             /*< 里程速度标准差 (m/s) */
+
+    std::vector<VisualObs> visual_obs;   /* 新增 */
 };
 
 /* ============================================================================
@@ -790,27 +851,31 @@ public:
     }
 
     bool PlusJacobian(const double *x, double *jacobian) const override {
+        /* PoseManifold 的切空间是 6 维，ambient 是 7 维：
+        *   切空间 δ = [δp(3), δφ(3)]
+        *   ambient = [p(3), qx, qy, qz, qw]
+        * 输出缓冲区是 7×6 的 RowMajor 矩阵。 */
         Eigen::Map<Eigen::Matrix<double, 7, 6, Eigen::RowMajor>> J(jacobian);
         J.setZero();
+
+        /* 位置部分：∂p/∂δp = I_3 */
         J.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity();
 
+        /* 旋转部分：q' = q ⊗ Exp(δφ)，在 δφ = 0 处 ∂q/∂δφ = 0.5·Q(q)
+        * 但 pose 中四元数顺序是 [qx, qy, qz, qw]，需要重排行序： */
         const double qx = x[3], qy = x[4], qz = x[5], qw = x[6];
-        /* ∂q/∂δφ = 0.5 · [ -q_v  q_w I + [q_v]× ]  转置到 [x,y,z,w] 顺序 */
-        Eigen::Matrix<double, 4, 3> dq_dphi;
-        dq_dphi << -qx, -qy, -qz,
-                    qw, -qz,  qy,
-                    qz,  qw, -qx,
-                   -qy,  qx,  qw;
-        dq_dphi *= 0.5;
 
-        /* dq_dphi 行序 [w, x, y, z]，pose 的 [x, y, z, w] */
-        J.block<1, 3>(3, 3) = dq_dphi.row(1);   // pose[3] = qx
-        J.block<1, 3>(4, 3) = dq_dphi.row(2);   // pose[4] = qy
-        J.block<1, 3>(5, 3) = dq_dphi.row(3);   // pose[5] = qz
-        J.block<1, 3>(6, 3) = dq_dphi.row(0);   // pose[6] = qw
+        /* 与 Ceres 内置 QuaternionManifold 一致：
+        *   ∂qx/∂δφ = 0.5·( qw, -qz,  qy)
+        *   ∂qy/∂δφ = 0.5·( qz,  qw, -qx)
+        *   ∂qz/∂δφ = 0.5·(-qy,  qx,  qw)
+        *   ∂qw/∂δφ = 0.5·(-qx, -qy, -qz)  */
+        J(3, 3) =  0.5 * qw; J(3, 4) = -0.5 * qz; J(3, 5) =  0.5 * qy;
+        J(4, 3) =  0.5 * qz; J(4, 4) =  0.5 * qw; J(4, 5) = -0.5 * qx;
+        J(5, 3) = -0.5 * qy; J(5, 4) =  0.5 * qx; J(5, 5) =  0.5 * qw;
+        J(6, 3) = -0.5 * qx; J(6, 4) = -0.5 * qy; J(6, 5) = -0.5 * qz;
         return true;
     }
-
     bool Minus(const double *y, const double *x, double *y_minus_x) const override {
         y_minus_x[0] = y[0] - x[0];
         y_minus_x[1] = y[1] - x[1];
@@ -848,6 +913,76 @@ public:
         Jq *= 2.0;
 
         J.block<3, 4>(3, 3) = Jq;
+        return true;
+    }
+};
+
+/* ============================================================================
+ * CalibManifold：NUM_CALIB=14 维参数块的流形
+ *   前 10 维（sodo, ap, ay, lvx, lvy, lvz, yoff, tbx, tby, tbz）加性
+ *   后 4 维（qbx, qby, qbz, qbw）用四元数流形（切空间 3 维）
+ *   总 ambient = 14, tangent = 13
+ * ==========================================================================*/
+class CalibManifold : public ceres::Manifold {
+public:
+    int AmbientSize() const override { return NUM_CALIB; }
+    int TangentSize() const override { return NUM_CALIB - 1; }
+
+    bool Plus(const double* x, const double* delta, double* x_plus) const override {
+        for (int i = 0; i < 10; ++i) x_plus[i] = x[i] + delta[i];
+        quat q(x[13], x[10], x[11], x[12]);   /* (w, x, y, z) */
+        quat dq = rv2q(vect3(delta[10], delta[11], delta[12]));
+        quat q_new = q * dq;
+        normlize(&q_new);
+        x_plus[10] = q_new.q1;
+        x_plus[11] = q_new.q2;
+        x_plus[12] = q_new.q3;
+        x_plus[13] = q_new.q0;
+        return true;
+    }
+
+    bool PlusJacobian(const double* x, double* jacobian) const override {
+        Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic,
+                                 Eigen::Dynamic, Eigen::RowMajor>>
+            J(jacobian, NUM_CALIB, NUM_CALIB - 1);
+        J.setZero();
+        for (int i = 0; i < 10; ++i) J(i, i) = 1.0;
+        const double qx = x[10], qy = x[11], qz = x[12], qw = x[13];
+        /* 0.5 * Q(q_bc)，行序 [qx, qy, qz, qw] */
+        J(10,10) =  0.5*qw; J(10,11) = -0.5*qz; J(10,12) =  0.5*qy;
+        J(11,10) =  0.5*qz; J(11,11) =  0.5*qw; J(11,12) = -0.5*qx;
+        J(12,10) = -0.5*qy; J(12,11) =  0.5*qx; J(12,12) =  0.5*qw;
+        J(13,10) = -0.5*qx; J(13,11) = -0.5*qy; J(13,12) = -0.5*qz;
+        return true;
+    }
+
+    bool Minus(const double* y, const double* x, double* y_minus_x) const override {
+        for (int i = 0; i < 10; ++i) y_minus_x[i] = y[i] - x[i];
+        quat qy(y[13], y[10], y[11], y[12]);
+        quat qx(x[13], x[10], x[11], x[12]);
+        vect3 dphi = q2rv((~qx) * qy);
+        y_minus_x[10] = dphi.i;
+        y_minus_x[11] = dphi.j;
+        y_minus_x[12] = dphi.k;
+        return true;
+    }
+
+    bool MinusJacobian(const double* x, double* jacobian) const override {
+        Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic,
+                                Eigen::Dynamic, Eigen::RowMajor>>
+            J(jacobian, NUM_CALIB - 1, NUM_CALIB);
+        J.setZero();
+        for (int i = 0; i < 10; ++i) J(i, i) = 1.0;
+
+        const double qx = x[10], qy = x[11], qz = x[12], qw = x[13];
+
+        /* ∂δφ/∂q = 2·Q(q)ᵀ，列序 [qx, qy, qz, qw]：
+        *   δφx: ( 2qw,  2qz, -2qy, -2qx)
+        *   δφy: (-2qz,  2qw,  2qx, -2qy)
+        *   δφz: ( 2qy, -2qx,  2qw, -2qz) */
+        J(10,10) =  2*qw; J(10,11) =  2*qz; J(10,12) = -2*qy; J(10,13) = -2*qx;
+        J(11,10) = -2*qz; J(11,11) =  2*qw; J(11,12) =  2*qx; J(11,13) = -2*qy;
+        J(12,10) =  2*qy; J(12,11) = -2*qx; J(12,12) =  2*qw; J(12,13) = -2*qz;
         return true;
     }
 };
@@ -1155,13 +1290,6 @@ struct GnssVelResidual {
 /* ============================================================================
  * 因子 4：GNSS 航向（1 维，含航向偏置标定）
  *
- *   yaw_gnss（已做 ant_mode 折算，但不含 yaw_offset）
- *   残差：r = wrap(yaw(q) + yaw_off - yaw_gnss) / sigma
- *   yaw_off 从标定参数块 calib[6] 读取
- * ==========================================================================*/
-/* ============================================================================
- * 因子 4：GNSS 航向（1 维，含航向偏置标定）
- *
  *   观测 yaw_gnss（已做 ant_mode 折算，但不含 yaw_offset）
  *   残差  r = wrap(yaw(q) + yaw_off - yaw_gnss) / sigma
  *   yaw_off 从标定参数块 calib[6] 读取
@@ -1354,6 +1482,245 @@ struct OdoVelResidual {
     double sigma_, huber_delta_;
 };
 
+/* ============================================================================
+ * 因子 8：视觉重投影（2 维，手写雅可比，纯 mat3 / vect3 运算）
+ *
+ * 参数块顺序：pose_i[7] · pose_j[7] · calib[14] · inv_depth[1]
+ *
+ * 残差：r = π(T_cj_w · T_wc_i · (obs_i / ρ)) - obs_j
+ *
+ * 雅可比输出的是"对 ambient 参数的偏导"：
+ *   pose 的 q 部分用 ∂r/∂q = 2·(∂r/∂φ)·Q(q)^T 转换（详见下文），
+ *   Ceres 的 PoseManifold 会自动把结果投影到 6 维切空间。
+ * ==========================================================================*/
+struct VisualReprojResidual : public ceres::CostFunction {
+    VisualReprojResidual(const vect3& obs_i, const vect3& obs_j, double sigma)
+        : obs_i_(obs_i), obs_j_(obs_j),
+          sigma_inv_(1.0 / (sigma > 1e-9 ? sigma : 1e-9)) {
+        set_num_residuals(2);
+        mutable_parameter_block_sizes()->push_back(7);          /* pose_i */
+        mutable_parameter_block_sizes()->push_back(7);          /* pose_j */
+        mutable_parameter_block_sizes()->push_back(NUM_CALIB);  /* calib  */
+        mutable_parameter_block_sizes()->push_back(1);          /* inv_depth */
+    }
+
+    bool Evaluate(const double* const* params,
+                  double* residuals,
+                  double** jacobians) const override {
+        /* ---------- 1) 拆参数 ---------- */
+        const double* pose_i = params[0];
+        const double* pose_j = params[1];
+        const double* calib  = params[2];
+        const double  rho    = params[3][0];
+
+        const vect3 p_i(pose_i[0], pose_i[1], pose_i[2]);
+        const quat  q_i(pose_i[6], pose_i[3], pose_i[4], pose_i[5]);
+        const vect3 p_j(pose_j[0], pose_j[1], pose_j[2]);
+        const quat  q_j(pose_j[6], pose_j[3], pose_j[4], pose_j[5]);
+
+        const vect3 t_bc(calib[7], calib[8], calib[9]);
+        const quat  q_bc(calib[13], calib[10], calib[11], calib[12]);
+
+        /* ---------- 2) 旋转矩阵 ---------- */
+        const mat3 R_i  = q2mat(q_i);
+        const mat3 R_j  = q2mat(q_j);
+        const mat3 R_bc = q2mat(q_bc);
+
+        /* ---------- 3) T_wc_i / T_wc_j ---------- */
+        const mat3  R_wc_i = R_i * R_bc;
+        const vect3 p_wc_i = p_i + R_i * t_bc;    /* mat3 * vect3 */
+
+        const mat3  R_wc_j = R_j * R_bc;
+        const vect3 p_wc_j = p_j + R_j * t_bc;
+
+        /* ---------- 4) 特征点在相机 i 系下的 3D 坐标 ---------- */
+        const double inv_rho = 1.0 / rho;
+        const vect3  P_c_i(obs_i_.i * inv_rho,
+                           obs_i_.j * inv_rho,
+                           inv_rho);
+
+        /* ---------- 5) 转世界系，再转相机 j 系 ---------- */
+        const vect3 P_w   = p_wc_i + R_wc_i * P_c_i;
+        const vect3 P_c_j = (~R_wc_j) * (P_w - p_wc_j);
+
+        /* ---------- 6) 残差 ---------- */
+        double Z = P_c_j.k;
+        if (std::fabs(Z) < 1e-6) Z = 1e-6;
+        const double Zinv = 1.0 / Z;
+        const double X_Z  = P_c_j.i * Zinv;
+        const double Y_Z  = P_c_j.j * Zinv;
+
+        residuals[0] = (X_Z - obs_j_.i) * sigma_inv_;
+        residuals[1] = (Y_Z - obs_j_.j) * sigma_inv_;
+
+        if (jacobians == nullptr) return true;
+
+        /* ---------- 7) 投影函数的雅可比：用两行 vect3 表示 ---------- */
+        const vect3 J_pi_0(Zinv, 0.0, -X_Z * Zinv);
+        const vect3 J_pi_1(0.0, Zinv, -Y_Z * Zinv);
+
+        const mat3 R_wc_j_T = ~R_wc_j;
+
+        /* ---------- 8) 对 pose_i 的雅可比（2×7 ambient） ---------- */
+        if (jacobians[0] != nullptr) {
+            /* 特征在 body_i 系下的坐标 */
+            const vect3 P_i_Bi = t_bc + R_bc * P_c_i;
+
+            /* ∂r/∂p_i = σ⁻¹ · J_pi · R_wc_j^T           (2×3) */
+            const vect3 dpi_p0 = J_pi_0 * R_wc_j_T;
+            const vect3 dpi_p1 = J_pi_1 * R_wc_j_T;
+
+            /* ∂r/∂φ_i = -σ⁻¹ · J_pi · R_wc_j^T · R_i · [P_i_Bi]_×  (2×3) */
+            const mat3 tmp     = R_wc_j_T * R_i * askew(P_i_Bi);
+            const vect3 dpi_phi0 = J_pi_0 * tmp;
+            const vect3 dpi_phi1 = J_pi_1 * tmp;
+
+            /* 位置 3 列 */
+            jacobians[0][0 * 7 + 0] = dpi_p0.i * sigma_inv_;
+            jacobians[0][0 * 7 + 1] = dpi_p0.j * sigma_inv_;
+            jacobians[0][0 * 7 + 2] = dpi_p0.k * sigma_inv_;
+            jacobians[0][1 * 7 + 0] = dpi_p1.i * sigma_inv_;
+            jacobians[0][1 * 7 + 1] = dpi_p1.j * sigma_inv_;
+            jacobians[0][1 * 7 + 2] = dpi_p1.k * sigma_inv_;
+
+            /* ∂r/∂q = 2·(∂r/∂δφ)·Q(q)^T，Q(q)^T 的 4 列按 [qx, qy, qz, qw] 排列：
+            *   col(qx) = ( qw, -qz,  qy)
+            *   col(qy) = ( qz,  qw, -qx)
+            *   col(qz) = (-qy,  qx,  qw)
+            *   col(qw) = (-qx, -qy, -qz) */
+            const double qx = q_i.q1, qy = q_i.q2, qz = q_i.q3, qw = q_i.q0;
+            const vect3 dphi_r0(-dpi_phi0.i, -dpi_phi0.j, -dpi_phi0.k);
+            const vect3 dphi_r1(-dpi_phi1.i, -dpi_phi1.j, -dpi_phi1.k);
+            const vect3 col_qx( qw, -qz,  qy);
+            const vect3 col_qy( qz,  qw, -qx);
+            const vect3 col_qz(-qy,  qx,  qw);
+            const vect3 col_qw(-qx, -qy, -qz);
+
+            jacobians[0][0*7+3] = 2.0 * dot(dphi_r0, col_qx) * sigma_inv_;
+            jacobians[0][0*7+4] = 2.0 * dot(dphi_r0, col_qy) * sigma_inv_;
+            jacobians[0][0*7+5] = 2.0 * dot(dphi_r0, col_qz) * sigma_inv_;
+            jacobians[0][0*7+6] = 2.0 * dot(dphi_r0, col_qw) * sigma_inv_;
+            jacobians[0][1*7+3] = 2.0 * dot(dphi_r1, col_qx) * sigma_inv_;
+            jacobians[0][1*7+4] = 2.0 * dot(dphi_r1, col_qy) * sigma_inv_;
+            jacobians[0][1*7+5] = 2.0 * dot(dphi_r1, col_qz) * sigma_inv_;
+            jacobians[0][1*7+6] = 2.0 * dot(dphi_r1, col_qw) * sigma_inv_;
+        }
+
+        /* ---------- 9) 对 pose_j 的雅可比（2×7 ambient） ---------- */
+        if (jacobians[1] != nullptr) {
+            /* 特征在 body_j 系下的坐标 */
+            const vect3 P_Bj = (~R_j) * (P_w - p_j);
+
+            /* ∂r/∂p_j = -σ⁻¹ · J_pi · R_wc_j^T */
+            const vect3 dpj_p0 = J_pi_0 * R_wc_j_T;
+            const vect3 dpj_p1 = J_pi_1 * R_wc_j_T;
+
+            /* ∂r/∂φ_j = σ⁻¹ · J_pi · R_bc^T · [P_Bj]_× */
+            const mat3 tmp     = (~R_bc) * askew(P_Bj);
+            const vect3 dpj_phi0 = J_pi_0 * tmp;
+            const vect3 dpj_phi1 = J_pi_1 * tmp;
+
+            jacobians[1][0*7+0] = -dpj_p0.i * sigma_inv_;
+            jacobians[1][0*7+1] = -dpj_p0.j * sigma_inv_;
+            jacobians[1][0*7+2] = -dpj_p0.k * sigma_inv_;
+            jacobians[1][1*7+0] = -dpj_p1.i * sigma_inv_;
+            jacobians[1][1*7+1] = -dpj_p1.j * sigma_inv_;
+            jacobians[1][1*7+2] = -dpj_p1.k * sigma_inv_;
+
+            /* ∂r/∂q_j = 2·(∂r/∂δφ_j)·Q(q_j)^T
+            * Q(q_j)^T 的 4 列按 [qx, qy, qz, qw]：
+            *   col(qx) = ( qw, -qz,  qy)
+            *   col(qy) = ( qz,  qw, -qx)
+            *   col(qz) = (-qy,  qx,  qw)
+            *   col(qw) = (-qx, -qy, -qz)  */
+            const double qx = q_j.q1, qy = q_j.q2, qz = q_j.q3, qw = q_j.q0;
+            const vect3 col_qx( qw, -qz,  qy);
+            const vect3 col_qy( qz,  qw, -qx);
+            const vect3 col_qz(-qy,  qx,  qw);
+            const vect3 col_qw(-qx, -qy, -qz);
+            const vect3 dr0(dpj_phi0.i, dpj_phi0.j, dpj_phi0.k);
+            const vect3 dr1(dpj_phi1.i, dpj_phi1.j, dpj_phi1.k);
+
+            jacobians[1][0*7+3] = 2.0 * dot(dr0, col_qx) * sigma_inv_;
+            jacobians[1][0*7+4] = 2.0 * dot(dr0, col_qy) * sigma_inv_;
+            jacobians[1][0*7+5] = 2.0 * dot(dr0, col_qz) * sigma_inv_;
+            jacobians[1][0*7+6] = 2.0 * dot(dr0, col_qw) * sigma_inv_;
+            jacobians[1][1*7+3] = 2.0 * dot(dr1, col_qx) * sigma_inv_;
+            jacobians[1][1*7+4] = 2.0 * dot(dr1, col_qy) * sigma_inv_;
+            jacobians[1][1*7+5] = 2.0 * dot(dr1, col_qz) * sigma_inv_;
+            jacobians[1][1*7+6] = 2.0 * dot(dr1, col_qw) * sigma_inv_;
+        }
+
+        /* ---------- 10) 对 calib[14] 的雅可比 ---------- */
+        if (jacobians[2] != nullptr) {
+            /* 全部清零（calib[0..6] 的列全为 0） */
+            for (int r = 0; r < 2; ++r)
+                for (int c = 0; c < NUM_CALIB; ++c)
+                    jacobians[2][r * NUM_CALIB + c] = 0.0;
+
+            /* --- 对 t_bc（calib[7..9]）--- */
+            /* ∂r/∂t_bc = σ⁻¹ · J_pi · (R_wc_j^T · R_i - R_bc^T)
+            * 注意：δt 在机体系（CalibManifold::Plus 是纯加性扰动），
+            *       所以是 R_bc^T，不是 I_3（那是相机系扰动的结果）。 */
+            const mat3 Rd = R_wc_j_T * R_i - (~R_bc);
+
+            const vect3 dt_0 = J_pi_0 * Rd;
+            const vect3 dt_1 = J_pi_1 * Rd;
+
+            jacobians[2][0*NUM_CALIB + 7] = dt_0.i * sigma_inv_;
+            jacobians[2][0*NUM_CALIB + 8] = dt_0.j * sigma_inv_;
+            jacobians[2][0*NUM_CALIB + 9] = dt_0.k * sigma_inv_;
+            jacobians[2][1*NUM_CALIB + 7] = dt_1.i * sigma_inv_;
+            jacobians[2][1*NUM_CALIB + 8] = dt_1.j * sigma_inv_;
+            jacobians[2][1*NUM_CALIB + 9] = dt_1.k * sigma_inv_;
+
+            /* --- 对 q_bc（calib[10..13]）---
+             * ∂r/∂φ_bc = σ⁻¹ · J_pi · ([P_c_j]_× - R_wc_j^T · R_wc_i · [P_c_i]_×)
+             */
+            const mat3 inner = R_wc_j_T * R_wc_i * askew(P_c_i);
+            const mat3 outer = askew(P_c_j) - inner;
+
+            const vect3 dphi_0 = J_pi_0 * outer;
+            const vect3 dphi_1 = J_pi_1 * outer;
+
+            const double qbx = q_bc.q1, qby = q_bc.q2,
+                        qbz = q_bc.q3, qbw = q_bc.q0;
+            const vect3 col_qx( qbw, -qbz,  qby);
+            const vect3 col_qy( qbz,  qbw, -qbx);
+            const vect3 col_qz(-qby,  qbx,  qbw);
+            const vect3 col_qw(-qbx, -qby, -qbz);
+            const vect3 dr0(dphi_0.i, dphi_0.j, dphi_0.k);
+            const vect3 dr1(dphi_1.i, dphi_1.j, dphi_1.k);
+
+            jacobians[2][0*NUM_CALIB + 10] = 2.0 * dot(dr0, col_qx) * sigma_inv_;
+            jacobians[2][0*NUM_CALIB + 11] = 2.0 * dot(dr0, col_qy) * sigma_inv_;
+            jacobians[2][0*NUM_CALIB + 12] = 2.0 * dot(dr0, col_qz) * sigma_inv_;
+            jacobians[2][0*NUM_CALIB + 13] = 2.0 * dot(dr0, col_qw) * sigma_inv_;
+            jacobians[2][1*NUM_CALIB + 10] = 2.0 * dot(dr1, col_qx) * sigma_inv_;
+            jacobians[2][1*NUM_CALIB + 11] = 2.0 * dot(dr1, col_qy) * sigma_inv_;
+            jacobians[2][1*NUM_CALIB + 12] = 2.0 * dot(dr1, col_qz) * sigma_inv_;
+            jacobians[2][1*NUM_CALIB + 13] = 2.0 * dot(dr1, col_qw) * sigma_inv_;
+        }
+
+        /* ---------- 11) 对逆深度的雅可比（2×1） ---------- */
+        if (jacobians[3] != nullptr) {
+            /* ∂r/∂ρ = -σ⁻¹/ρ · J_pi · R_wc_j^T · R_wc_i · P_c_i
+            * 注意 J_pi_k 是 3D 行向量，右侧 (R_wc_j^T·R_wc_i·P_c_i) 是 3D 列向量，
+            * 二者相乘是点乘（不是叉乘） */
+            const vect3 u = R_wc_j_T * (R_wc_i * P_c_i);   /* 3D 向量 */
+            const double dr0 = dot(J_pi_0, u);
+            const double dr1 = dot(J_pi_1, u);
+            jacobians[3][0] = -dr0 * sigma_inv_ / rho;
+            jacobians[3][1] = -dr1 * sigma_inv_ / rho;
+        }
+
+        return true;
+    }
+
+    vect3  obs_i_, obs_j_;
+    double sigma_inv_;
+};
+
 struct FrameCompare {
     double time = 0.0;
 
@@ -1431,6 +1798,12 @@ struct RunnerOptions {
     /* ---- 标定 ---- */
     bool       calib_mode{false};  /*< true: 标定模式; false: 导航模式 */
     CalibState calib_init{};       /*< 标定参数初值（标定/导航均可设） */
+
+    bool        use_visual   = false;
+    double      visual_sigma = 1.5 / 460.0;
+    double      visual_huber = 1.0;
+    std::string cam_dir;                  /* 图像目录（离线预处理用） */
+    CameraModel cam_model{};              /* 相机内参 */
 };
 
 struct RunnerStats {
@@ -1542,6 +1915,12 @@ public:
         bool   calib_mode = false;
         vect3  odo_abv{0.0, 0.0, 0.0};    /*< 安装角 [pitch, 0, yaw]，rad */
         vect3  odo_lvOD{0.0, 0.0, 0.0};   /*< 杆臂（b 系，m） */
+
+        bool   use_visual    = false;
+        double visual_sigma  = 1.5 / 460.0;
+        double visual_huber  = 1.0;
+        double inv_depth_min = 1.0 / 500.0;
+        double inv_depth_max = 1.0 / 0.5;
     };
 
     GraphOptimizer() = default;
@@ -1564,6 +1943,9 @@ public:
     void setCalibState(const CalibState &c) { c.toData(calib_data_.data()); }
     CalibState getCalibState() const { CalibState c; c.fromData(calib_data_.data()); return c; }
 
+    std::map<int, double>&       invDepths()       { return inv_depths_; }
+    const std::map<int, double>& invDepths() const { return inv_depths_; }
+
 private:
     /* 组装 Ceres 问题：把 frames 的所有因子加进去 */
     void buildProblem(ceres::Problem &problem, std::vector<Frame> &frames,  const vect3 &g_n);
@@ -1576,6 +1958,7 @@ private:
     mat  J_prior_;   /*< 上一次边缘化的先验信息矩阵 */
     vect r_prior_;   /*< 上一次边缘化的先验信息向量 */
     std::array<double, NUM_CALIB> calib_data_{};
+    std::map<int, double> inv_depths_;
 
 public:
     /* 求解统计（供上层评估计算量与收敛性） */
@@ -1695,7 +2078,11 @@ void accumulate_normal_equations(const mat &J, const vect &r, mat &H, vect &b);
 /* Schur 补边缘化，返回 false 表示维数非法或数值分解失败 */
 bool schur_complement(const mat &H, const vect &b, int num_marginalized, mat &J_out, vect &r_out);
 
-
+std::map<double, std::vector<VisualObs>>
+preprocessImages(const std::string& cam_dir,  const CameraModel& cam,
+                 double visual_sigma,
+                 int    max_feat = 150,
+                 int    min_dist = 20);
 
 
 

@@ -13,6 +13,10 @@ set(CMAKE_MAKEFILE_DEPENDS
   "/usr/lib/cmake/eigen3/Eigen3Config.cmake"
   "/usr/lib/cmake/eigen3/Eigen3ConfigVersion.cmake"
   "/usr/lib/cmake/eigen3/Eigen3Targets.cmake"
+  "/usr/lib/x86_64-linux-gnu/cmake/opencv4/OpenCVConfig-version.cmake"
+  "/usr/lib/x86_64-linux-gnu/cmake/opencv4/OpenCVConfig.cmake"
+  "/usr/lib/x86_64-linux-gnu/cmake/opencv4/OpenCVModules-release.cmake"
+  "/usr/lib/x86_64-linux-gnu/cmake/opencv4/OpenCVModules.cmake"
   "/usr/local/lib/cmake/Ceres/CeresConfig.cmake"
   "/usr/local/lib/cmake/Ceres/CeresConfigVersion.cmake"
   "/usr/local/lib/cmake/Ceres/CeresTargets-release.cmake"
@@ -56,6 +60,7 @@ set(CMAKE_MAKEFILE_PRODUCTS
 
 # Dependency information for all targets:
 set(CMAKE_DEPEND_INFO_FILES
+  "CMakeFiles/test_visual.dir/DependInfo.cmake"
   "CMakeFiles/test_marg.dir/DependInfo.cmake"
   "CMakeFiles/test_ma.dir/DependInfo.cmake"
   "CMakeFiles/test_pre.dir/DependInfo.cmake"

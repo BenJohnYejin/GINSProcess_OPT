@@ -56,9 +56,20 @@
 
 static void printUsage(const char *exe) {
     std::printf("用法: %s <xxx.bin> [最大帧数] [输出.nav] [逐帧对比.csv] [选项...]\n", exe);
-    std::printf("选项: --ant-mode=<FB_B|FB_F|LR_L|LR_R|ONE> --yaw-offset=<deg> --no-init-yaw "
-                "--whiten[=0|1] --bias-jac --vel --yaw --static "
-                "--gap=<t0>:<t1> --kf=<n> --iter=<n> --no-fix-first\n");
+    std::printf("选项:\n");
+    std::printf("  姿态/航向: --ant-mode=<FB_B|FB_F|LR_L|LR_R|ONE> --yaw-offset=<deg>\n"
+                "             --no-init-yaw --vel --yaw --static --no-fix-first\n");
+    std::printf("  求解:      --whiten[=0|1] --bias-jac --kf=<n> --iter=<n>\n");
+    std::printf("  里程计:    --use-odometer --odo-std=<m/s>\n");
+    std::printf("  标定:      --calib --calib-init=<14 项逗号分隔>\n");
+    std::printf("             calib-init 格式:\n"
+                "               sodo,ap_deg,ay_deg,lx,ly,lz,yoff_deg,\n"
+                "               tbx,tby,tbz,qbx,qby,qbz,qbw\n"
+                "             （若只填 7 项，则相机外参保持单位值）\n");
+    std::printf("  视觉:      --use-visual --cam-dir=<图像目录>\n"
+                "             --cam-intrin=fx,fy,cx,cy,k1,k2,p1,p2\n"
+                "             --visual-sigma=<归一化平面标准差> --visual-huber=<Huber δ>\n");
+    std::printf("  GNSS 中断: --gap=<t0>:<t1>\n");
 }
 
 static bool parseAntMode(const std::string &s, int &mode) {
@@ -89,6 +100,10 @@ int main(int argc, char *argv[]) {
     opt.whiten_preint = false;   /* 见 alg_lib.h：协方差未标定前不白化 */
     opt.calib_mode = true;
     opt.use_odometer = false;
+    opt.use_visual    = false;
+    opt.visual_sigma  = 1.5 / 460.0;   /* 1.5 px @ f=460 的归一化误差 */
+    opt.visual_huber  = 1.0;
+
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -134,27 +149,63 @@ int main(int argc, char *argv[]) {
             } else if (key == "--odo-std") {
                 opt.odo_vel_std = std::atof(val.c_str());
             } else if (key == "--calib-init") {
-                /* 格式: sodo,ap_deg,ay_deg,lx,ly,lz,yoff_deg */
-                double v[7] = {0};
+                /* 支持两种格式：
+                *   7  项：sodo,ap_deg,ay_deg,lx,ly,lz,yoff_deg
+                *   14 项：在 7 项基础上追加 tbx,tby,tbz,qbx,qby,qbz,qbw
+                */
+                double v[14] = {0};
                 int n = 0;
                 std::stringstream ss(val);
                 std::string tok;
-                while (std::getline(ss, tok, ',') && n < 7) {
+                while (std::getline(ss, tok, ',') && n < 14) {
                     v[n++] = std::atof(tok.c_str());
                 }
-                if (n == 7) {
-                    opt.calib_init.sodo           = v[0];
-                    opt.calib_init.abv_pitch      = v[1] * DEG;
-                    opt.calib_init.abv_yaw        = v[2] * DEG;
-                    opt.calib_init.lvOD           = vect3(v[3], v[4], v[5]);
+                if (n == 7 || n == 14) {
+                    opt.calib_init.sodo            = v[0];
+                    opt.calib_init.abv_pitch       = v[1] * DEG;
+                    opt.calib_init.abv_yaw         = v[2] * DEG;
+                    opt.calib_init.lvOD            = vect3(v[3], v[4], v[5]);
                     opt.calib_init.yaw_gnss_offset = v[6] * DEG;
+                    if (n == 14) {
+                        opt.calib_init.t_bc = vect3(v[7], v[8], v[9]);
+                        /* 四元数输入顺序 qx,qy,qz,qw，构造时 quat(w,x,y,z) */
+                        opt.calib_init.q_bc = quat(v[13], v[10], v[11], v[12]);
+                        /* 归一化，防止用户输入未归一化的四元数 */
+                        normlize(&opt.calib_init.q_bc);
+                    }
+                } else {
+                    std::fprintf(stderr, "--calib-init 需要 7 或 14 项，收到 %d 项\n", n);
+                    return 1;
                 }
-            } else {
-                std::fprintf(stderr, "未知选项: %s\n", a.c_str());
-                printUsage(argv[0]);
-                return 1;
             }
-            continue;
+            /* ---------- 视觉相关 ---------- */
+            else if (key == "--use-visual") {
+                opt.use_visual = true;
+            } else if (key == "--cam-dir") {
+                opt.cam_dir = val;
+            } else if (key == "--cam-intrin") {
+                /* fx,fy,cx,cy,k1,k2,p1,p2 */
+                double v[8] = {0};
+                int n = 0;
+                std::stringstream ss(val);
+                std::string tok;
+                while (std::getline(ss, tok, ',') && n < 8) {
+                    v[n++] = std::atof(tok.c_str());
+                }
+                if (n == 8) {
+                    opt.cam_model.fx = v[0];  opt.cam_model.fy = v[1];
+                    opt.cam_model.cx = v[2];  opt.cam_model.cy = v[3];
+                    opt.cam_model.k1 = v[4];  opt.cam_model.k2 = v[5];
+                    opt.cam_model.p1 = v[6];  opt.cam_model.p2 = v[7];
+                } else {
+                    std::fprintf(stderr, "--cam-intrin 需要 8 项 (fx,fy,cx,cy,k1,k2,p1,p2)\n");
+                    return 1;
+                }
+            } else if (key == "--visual-sigma") {
+                opt.visual_sigma = std::atof(val.c_str());
+            } else if (key == "--visual-huber") {
+                opt.visual_huber = std::atof(val.c_str());
+            }
         }
         switch (n_positional++) {
             case 0: bin_path   = a; break;
@@ -193,6 +244,22 @@ int main(int argc, char *argv[]) {
     std::printf("  优化后 rms : %.3f m   (max %.3f, P95 %.3f)\n",
                 st.opt_rms,  st.opt_max,  st.opt_pct[2]);
     std::printf("  改善比     : %.2f×\n", st.improve_ratio);
+
+    if (opt.use_visual || opt.calib_mode) {
+    const CalibState &c = st.calib_final;
+    std::printf("\n  ---- 标定参数 ----\n");
+    std::printf("  刻度因子 sodo   : %+10.6f\n", c.sodo);
+    std::printf("  安装角 pitch    : %+10.4f deg\n", c.abv_pitch / DEG);
+    std::printf("  安装角 yaw      : %+10.4f deg\n", c.abv_yaw   / DEG);
+    std::printf("  杆臂   lvOD     : (%+8.4f, %+8.4f, %+8.4f) m\n",
+                c.lvOD.i, c.lvOD.j, c.lvOD.k);
+    std::printf("  航向偏置        : %+10.4f deg\n", c.yaw_gnss_offset / DEG);
+    std::printf("  相机外参 t_bc   : (%+8.4f, %+8.4f, %+8.4f) m\n",
+                c.t_bc.i, c.t_bc.j, c.t_bc.k);
+    vect3 att = q2att(c.q_bc);
+    std::printf("  相机外参 q_bc   : pitch=%+7.3f° roll=%+7.3f° yaw=%+7.3f°\n",
+                att.i / DEG, att.j / DEG, att.k / DEG);
+}
 
     return 0;
 }
