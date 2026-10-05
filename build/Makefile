@@ -48,10 +48,10 @@ RM = /usr/bin/cmake -E remove -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT
+CMAKE_SOURCE_DIR = /mnt/d/08_Code/03_now/102_GINSProcess_OPT
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT/build
+CMAKE_BINARY_DIR = /mnt/d/08_Code/03_now/102_GINSProcess_OPT/build
 
 #=============================================================================
 # Targets provided globally by CMake.
@@ -80,9 +80,9 @@ edit_cache/fast: edit_cache
 
 # The main all target
 all: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT/build/CMakeFiles /mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT/build/CMakeFiles/progress.marks
+	$(CMAKE_COMMAND) -E cmake_progress_start /mnt/d/08_Code/03_now/102_GINSProcess_OPT/build/CMakeFiles /mnt/d/08_Code/03_now/102_GINSProcess_OPT/build/CMakeFiles/progress.marks
 	$(MAKE) -f CMakeFiles/Makefile2 all
-	$(CMAKE_COMMAND) -E cmake_progress_start /mnt/d/01_Code/06_Legacy/factor/GINSProcess_OPT/build/CMakeFiles 0
+	$(CMAKE_COMMAND) -E cmake_progress_start /mnt/d/08_Code/03_now/102_GINSProcess_OPT/build/CMakeFiles 0
 .PHONY : all
 
 # The main clean target
@@ -148,6 +148,19 @@ test_ma: cmake_check_build_system
 test_ma/fast:
 	$(MAKE) -f CMakeFiles/test_ma.dir/build.make CMakeFiles/test_ma.dir/build
 .PHONY : test_ma/fast
+
+#=============================================================================
+# Target rules for targets named test_gnss
+
+# Build rule for target.
+test_gnss: cmake_check_build_system
+	$(MAKE) -f CMakeFiles/Makefile2 test_gnss
+.PHONY : test_gnss
+
+# fast build rule for target.
+test_gnss/fast:
+	$(MAKE) -f CMakeFiles/test_gnss.dir/build.make CMakeFiles/test_gnss.dir/build
+.PHONY : test_gnss/fast
 
 #=============================================================================
 # Target rules for targets named test_pre
@@ -254,6 +267,33 @@ src/main.s: src/main.cpp.s
 src/main.cpp.s:
 	$(MAKE) -f CMakeFiles/ipos3_opt.dir/build.make CMakeFiles/ipos3_opt.dir/src/main.cpp.s
 .PHONY : src/main.cpp.s
+
+test/test_gnss.o: test/test_gnss.cpp.o
+
+.PHONY : test/test_gnss.o
+
+# target to build an object file
+test/test_gnss.cpp.o:
+	$(MAKE) -f CMakeFiles/test_gnss.dir/build.make CMakeFiles/test_gnss.dir/test/test_gnss.cpp.o
+.PHONY : test/test_gnss.cpp.o
+
+test/test_gnss.i: test/test_gnss.cpp.i
+
+.PHONY : test/test_gnss.i
+
+# target to preprocess a source file
+test/test_gnss.cpp.i:
+	$(MAKE) -f CMakeFiles/test_gnss.dir/build.make CMakeFiles/test_gnss.dir/test/test_gnss.cpp.i
+.PHONY : test/test_gnss.cpp.i
+
+test/test_gnss.s: test/test_gnss.cpp.s
+
+.PHONY : test/test_gnss.s
+
+# target to generate assembly for a file
+test/test_gnss.cpp.s:
+	$(MAKE) -f CMakeFiles/test_gnss.dir/build.make CMakeFiles/test_gnss.dir/test/test_gnss.cpp.s
+.PHONY : test/test_gnss.cpp.s
 
 test/test_ma.o: test/test_ma.cpp.o
 
@@ -401,6 +441,7 @@ help:
 	@echo "... test_visual"
 	@echo "... test_marg"
 	@echo "... test_ma"
+	@echo "... test_gnss"
 	@echo "... test_pre"
 	@echo "... test_math"
 	@echo "... ipos3_opt"
@@ -411,6 +452,9 @@ help:
 	@echo "... src/main.o"
 	@echo "... src/main.i"
 	@echo "... src/main.s"
+	@echo "... test/test_gnss.o"
+	@echo "... test/test_gnss.i"
+	@echo "... test/test_gnss.s"
 	@echo "... test/test_ma.o"
 	@echo "... test/test_ma.i"
 	@echo "... test/test_ma.s"

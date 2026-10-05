@@ -62,3 +62,6 @@ target_link_libraries(test_visual PRIVATE ipos3_opt_lib)
 
 #add_executable(test_flow test/test_flow.cpp)
 #target_link_libraries(test_flow PRIVATE ipos3_opt_lib)
+
+add_executable(test_gnss test/test_gnss.cpp)
+target_link_libraries(test_gnss PRIVATE ipos3_opt_lib)

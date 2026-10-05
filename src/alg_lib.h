@@ -89,6 +89,37 @@ constexpr double EPS   = 2.220446049e-16;
 constexpr double INF   = 3.402823466e+30;
 constexpr double INFp5 = INF * 0.5;
 
+/* ============================ 多频 GNSS 常量 ============================ */
+constexpr int    MAX_FREQ = 3;
+constexpr double CLIGHT   = 299792458.0;
+
+struct FreqInfo {
+    double freq_hz;
+    double lambda;
+    double sigma_P;
+    double sigma_L;
+    double sigma_D;
+};
+
+constexpr FreqInfo GPS_FREQ[3] = {
+    {1575.42e6, CLIGHT / 1575.42e6, 0.3, 0.003, 0.5},   /* L1 */
+    {1227.60e6, CLIGHT / 1227.60e6, 0.3, 0.003, 0.5},   /* L2 */
+    {1176.45e6, CLIGHT / 1176.45e6, 0.2, 0.002, 0.4},   /* L5 */
+};
+
+constexpr double FREQ_L1   = GPS_FREQ[0].freq_hz;
+constexpr double LAMBDA_L1 = GPS_FREQ[0].lambda;
+
+constexpr double LAMBDA_WL = CLIGHT / (GPS_FREQ[0].freq_hz - GPS_FREQ[1].freq_hz);
+constexpr double LAMBDA_NL = CLIGHT / (GPS_FREQ[0].freq_hz + GPS_FREQ[1].freq_hz);
+
+constexpr double ALPHA_IF =  GPS_FREQ[0].freq_hz * GPS_FREQ[0].freq_hz
+                           / (GPS_FREQ[0].freq_hz * GPS_FREQ[0].freq_hz
+                            - GPS_FREQ[1].freq_hz * GPS_FREQ[1].freq_hz);
+constexpr double BETA_IF  = -GPS_FREQ[1].freq_hz * GPS_FREQ[1].freq_hz
+                           / (GPS_FREQ[0].freq_hz * GPS_FREQ[0].freq_hz
+                            - GPS_FREQ[1].freq_hz * GPS_FREQ[1].freq_hz);
+
 /* 参数块维数 ---------------------------------------------------------------------*/
 constexpr int NUM_POSE      = 7;  /*< p(3) + q(4) */
 constexpr int NUM_MIX       = 9;  /*< v(3) + bg(3) + ba(3) */
@@ -443,6 +474,21 @@ template <typename T>
 inline Eigen::Quaternion<T> toEigQ(const quat &q) {
     return Eigen::Quaternion<T>(T(q.q0), T(q.q1), T(q.q2), T(q.q3));
 }
+
+/* 模糊度 key：(ref_sat, sat, freq) → int */
+inline int ambKey(int ref_sat, int sat, int freq) {
+    return ((ref_sat & 0x3F) << 16) | ((sat & 0x3F) << 8) | (freq & 0x0F);
+}
+
+/* 把切空间 ∂r/∂δφ 投影成 ambient 四元数雅可比（PoseManifold::PlusJacobian
+ * 是 0.5·Q(q)，两侧相乘后严格还原 ∂r/∂δφ） */
+inline void projPhiToQAmbient(const vect3& dr_dphi, const quat& q, double* out4) {
+    const double qx = q.q1, qy = q.q2, qz = q.q3, qw = q.q0;
+    out4[0] = 2.0 * ( dr_dphi.i *  qw + dr_dphi.j * (-qz) + dr_dphi.k *  qy);
+    out4[1] = 2.0 * ( dr_dphi.i *  qz + dr_dphi.j *  qw  + dr_dphi.k * (-qx));
+    out4[2] = 2.0 * ( dr_dphi.i * (-qy) + dr_dphi.j *  qx + dr_dphi.k *  qw);
+    out4[3] = 2.0 * ( dr_dphi.i * (-qx) + dr_dphi.j * (-qy) + dr_dphi.k * (-qz));
+}
 /* ============================ 姿态 / 旋转 ============================ */
 mat3 a2mat(const vect3 &att);           /*< [pitch,roll,yaw]   -> Cnb  */
 quat a2qua(double pitch, double roll, double yaw);
@@ -595,11 +641,17 @@ public:
     /* ENU 下的地球自转 {0, wie*cos(lat0), wie*sin(lat0)} ------------------------*/
     const vect3 &wnie(void) const { return eth_.wnie; }
 
+    const mat3&  R_en_m3(void)   const { return R_en_m3_; }
+    const vect3& p0Ecef_v3(void) const { return p0_ecef_v3_; }
+
 private:
     bool init_{false};
     vect3 blh0_;
     vect3 gravity_;
     earth eth_;
+
+    mat3  R_en_m3_{1, 0, 0, 0, 1, 0, 0, 0, 1};
+    vect3 p0_ecef_v3_{0.0, 0.0, 0.0};
 };
 
 
@@ -700,15 +752,42 @@ struct VisualObs {
     double sigma{1.5 / 460.0};
 };
 
+struct SatState {
+    int    sat_id{0};
+    vect3  pos_ecef;
+    vect3  vel_ecef;
+    double clk_bias_s{0.0};
+    double clk_drift_sps{0.0};
+    double elev_rad{0.0};
+    bool   valid{false};
+};
+
+struct DDObs {
+    int    ref_sat{0};
+    int    sat{0};
+    double dd_P[MAX_FREQ]{};
+    double dd_L[MAX_FREQ]{};
+    double dd_D[MAX_FREQ]{};
+    bool   has_P[MAX_FREQ]{};
+    bool   has_L[MAX_FREQ]{};
+    bool   has_D[MAX_FREQ]{};
+    double sigma_P{0.6};
+    double sigma_L{0.01};
+    SatState sat_i, sat_k;
+};
+
 /* ---- 相机针孔模型 + 径向切向畸变 ---- */
 struct CameraModel {
     double fx{0.0}, fy{0.0}, cx{0.0}, cy{0.0};
     double k1{0.0}, k2{0.0}, p1{0.0}, p2{0.0};
     cv::Mat K() const {
-        return (cv::Mat_<double>(3,3) << fx,0,cx, 0,fy,cy, 0,0,1);
+        return cv::Mat(cv::Matx33d(fx, 0,  cx,
+                                0,  fy, cy,
+                                0,  0,  1));
     }
+
     cv::Mat D() const {
-        return (cv::Mat_<double>(1,4) << k1,k2,p1,p2);
+        return cv::Mat(cv::Matx14d(k1, k2, p1, p2));
     }
 };
 
@@ -826,6 +905,18 @@ struct Frame {
     double odo_std{0.05};             /*< 里程速度标准差 (m/s) */
 
     std::vector<VisualObs> visual_obs;
+
+    /* ---- GNSS 紧组合 ---- */
+    bool has_gnss_raw{false};
+    std::vector<DDObs>  dd_obs;
+    std::vector<std::array<double, MAX_FREQ>> amb_values;
+    std::vector<std::array<bool,   MAX_FREQ>> amb_fixed;
+    std::vector<double> amb_wl_values;
+    std::vector<bool>   amb_wl_fixed;
+    std::vector<double> amb_if_values;
+    std::vector<bool>   amb_if_fixed;
+    std::array<double, 1> clk_bias{{0.0}};
+    std::array<double, 1> clk_drift{{0.0}};
 };
 
 /* ============================================================================
@@ -1719,6 +1810,436 @@ struct VisualReprojResidual : public ceres::CostFunction {
     double sigma_inv_;
 };
 
+/* ============================================================================
+ * 因子：双差伪距（单频点，1 维，手推雅可比）
+ *
+ * 参数块：pose[7]
+ * 残差：r = (dd_P[f] - dd_ρ) / σ_f
+ *
+ * 雅可比：
+ *   ∂r/∂p_n = (κ_i - κ_k)ᵀ · R_en / σ_f
+ *   ∂r/∂δφ  = (κ_i - κ_k)ᵀ · R_en · R_bn · (-[t_ant]×) / σ_f
+ * ==========================================================================*/
+struct GnssDDPseudorangeFreqResidual : public ceres::CostFunction {
+    GnssDDPseudorangeFreqResidual(const DDObs& dd, int freq,
+                                  const vect3& base_pos,
+                                  const mat3&  R_en,
+                                  const vect3& p0,
+                                  const vect3& t_ant)
+        : dd_(dd), freq_(freq), base_pos_(base_pos),
+          R_en_(R_en), p0_(p0), t_ant_(t_ant) {
+        const double sigma = std::max(GPS_FREQ[freq].sigma_P * 1.4142, 0.1);
+        sigma_inv_ = 1.0 / sigma;
+        set_num_residuals(1);
+        mutable_parameter_block_sizes()->push_back(7);
+    }
+
+    bool Evaluate(const double* const* params,
+                  double* residuals, double** jacobians) const override {
+        const double* pose = params[0];
+
+        const vect3 p_n(pose[0], pose[1], pose[2]);
+        const quat  q  (pose[6], pose[3], pose[4], pose[5]);
+        const mat3  R_bn = q2mat(q);
+
+        const vect3 p_e = p0_ + R_en_ * (p_n + R_bn * t_ant_);
+
+        const vect3 si = dd_.sat_i.pos_ecef - p_e;
+        const vect3 sk = dd_.sat_k.pos_ecef - p_e;
+        const double rho_i = norm(si);
+        const double rho_k = norm(sk);
+        if (rho_i < 1e-6 || rho_k < 1e-6) { residuals[0] = 0.0; return true; }
+
+        const vect3 bi = dd_.sat_i.pos_ecef - base_pos_;
+        const vect3 bk = dd_.sat_k.pos_ecef - base_pos_;
+        const double dd_rho = (rho_i - rho_k) - (norm(bi) - norm(bk));
+
+        residuals[0] = (dd_.dd_P[freq_] - dd_rho) * sigma_inv_;
+
+        if (jacobians == nullptr) return true;
+
+        const vect3 kappa_i = si / rho_i;
+        const vect3 kappa_k = sk / rho_k;
+        const vect3 dr_dpe  = (kappa_i - kappa_k) * sigma_inv_;
+
+        if (jacobians[0] != nullptr) {
+            const vect3 dr_dpn = dr_dpe * R_en_;
+            jacobians[0][0] = dr_dpn.i;
+            jacobians[0][1] = dr_dpn.j;
+            jacobians[0][2] = dr_dpn.k;
+
+            const vect3 dr_dphi =
+                (dr_dpe * R_en_ * R_bn) * (-askew(t_ant_));
+            projPhiToQAmbient(dr_dphi, q, &jacobians[0][3]);
+        }
+        return true;
+    }
+
+    DDObs  dd_;
+    int    freq_;
+    vect3  base_pos_, p0_, t_ant_;
+    mat3   R_en_;
+    double sigma_inv_;
+};
+
+/* ============================================================================
+ * 因子：双差载波（单频点，1 维）
+ * 参数块：pose[7] · amb[1]（cycle）
+ * 残差：r = (λ_f · dd_L[f] - dd_ρ - λ_f · N_f) / σ_f
+ * 雅可比：对 pose 与伪距相同；对 amb = -λ_f / σ_f
+ * ==========================================================================*/
+struct GnssDDCarrierFreqResidual : public ceres::CostFunction {
+    GnssDDCarrierFreqResidual(const DDObs& dd, int freq,
+                              const vect3& base_pos,
+                              const mat3&  R_en,
+                              const vect3& p0,
+                              const vect3& t_ant)
+        : dd_(dd), freq_(freq), base_pos_(base_pos),
+          R_en_(R_en), p0_(p0), t_ant_(t_ant) {
+        const double sigma = std::max(GPS_FREQ[freq].sigma_L * 1.4142, 1e-4);
+        sigma_inv_ = 1.0 / sigma;
+        lambda_    = GPS_FREQ[freq].lambda;
+        set_num_residuals(1);
+        mutable_parameter_block_sizes()->push_back(7);
+        mutable_parameter_block_sizes()->push_back(1);
+    }
+
+    bool Evaluate(const double* const* params,
+                  double* residuals, double** jacobians) const override {
+        const double* pose = params[0];
+        const double* amb  = params[1];
+
+        const vect3 p_n(pose[0], pose[1], pose[2]);
+        const quat  q  (pose[6], pose[3], pose[4], pose[5]);
+        const mat3  R_bn = q2mat(q);
+        const vect3 p_e  = p0_ + R_en_ * (p_n + R_bn * t_ant_);
+
+        const vect3 si = dd_.sat_i.pos_ecef - p_e;
+        const vect3 sk = dd_.sat_k.pos_ecef - p_e;
+        const double rho_i = norm(si);
+        const double rho_k = norm(sk);
+        if (rho_i < 1e-6 || rho_k < 1e-6) { residuals[0] = 0.0; return true; }
+
+        const vect3 bi = dd_.sat_i.pos_ecef - base_pos_;
+        const vect3 bk = dd_.sat_k.pos_ecef - base_pos_;
+        const double dd_rho = (rho_i - rho_k) - (norm(bi) - norm(bk));
+
+        residuals[0] = (lambda_ * dd_.dd_L[freq_] - dd_rho - lambda_ * amb[0])
+                       * sigma_inv_;
+
+        if (jacobians == nullptr) return true;
+
+        const vect3 kappa_i = si / rho_i;
+        const vect3 kappa_k = sk / rho_k;
+        const vect3 dr_dpe  = (kappa_i - kappa_k) * sigma_inv_;
+
+        if (jacobians[0] != nullptr) {
+            const vect3 dr_dpn = dr_dpe * R_en_;
+            jacobians[0][0] = dr_dpn.i;
+            jacobians[0][1] = dr_dpn.j;
+            jacobians[0][2] = dr_dpn.k;
+
+            const vect3 dr_dphi =
+                (dr_dpe * R_en_ * R_bn) * (-askew(t_ant_));
+            projPhiToQAmbient(dr_dphi, q, &jacobians[0][3]);
+        }
+        if (jacobians[1] != nullptr) {
+            jacobians[1][0] = -lambda_ * sigma_inv_;
+        }
+        return true;
+    }
+
+    DDObs  dd_;
+    int    freq_;
+    vect3  base_pos_, p0_, t_ant_;
+    mat3   R_en_;
+    double sigma_inv_;
+    double lambda_;
+};
+
+/* ============================================================================
+ * 因子：双差宽巷 WL（1 维）
+ * dd_L_WL = (f1·dd_L1 - f2·dd_L2) / (f1 - f2)  (cycle)
+ * 残差：r = (λ_WL·dd_L_WL - dd_ρ - λ_WL·N_WL) / σ_WL
+ * ==========================================================================*/
+struct GnssDDWideLaneResidual : public ceres::CostFunction {
+    GnssDDWideLaneResidual(const DDObs& dd, const vect3& base_pos,
+                           const mat3& R_en, const vect3& p0,
+                           const vect3& t_ant, double sigma_wl)
+        : dd_(dd), base_pos_(base_pos), R_en_(R_en), p0_(p0), t_ant_(t_ant) {
+        sigma_inv_ = 1.0 / std::max(sigma_wl, 0.01);
+        set_num_residuals(1);
+        mutable_parameter_block_sizes()->push_back(7);
+        mutable_parameter_block_sizes()->push_back(1);
+    }
+
+    bool Evaluate(const double* const* params,
+                  double* residuals, double** jacobians) const override {
+        const double* pose = params[0];
+        const double* amb  = params[1];
+
+        const vect3 p_n(pose[0], pose[1], pose[2]);
+        const quat  q  (pose[6], pose[3], pose[4], pose[5]);
+        const mat3  R_bn = q2mat(q);
+        const vect3 p_e  = p0_ + R_en_ * (p_n + R_bn * t_ant_);
+
+        const vect3 si = dd_.sat_i.pos_ecef - p_e;
+        const vect3 sk = dd_.sat_k.pos_ecef - p_e;
+        const double rho_i = norm(si);
+        const double rho_k = norm(sk);
+        if (rho_i < 1e-6 || rho_k < 1e-6) { residuals[0] = 0.0; return true; }
+
+        const vect3 bi = dd_.sat_i.pos_ecef - base_pos_;
+        const vect3 bk = dd_.sat_k.pos_ecef - base_pos_;
+        const double dd_rho = (rho_i - rho_k) - (norm(bi) - norm(bk));
+
+        const double f1 = GPS_FREQ[0].freq_hz;
+        const double f2 = GPS_FREQ[1].freq_hz;
+        const double dd_L_WL = (f1 * dd_.dd_L[0] - f2 * dd_.dd_L[1])
+                             / (f1 - f2);
+
+        residuals[0] = (LAMBDA_WL * dd_L_WL - dd_rho
+                        - LAMBDA_WL * amb[0]) * sigma_inv_;
+
+        if (jacobians == nullptr) return true;
+
+        const vect3 kappa_i = si / rho_i;
+        const vect3 kappa_k = sk / rho_k;
+        const vect3 dr_dpe  = (kappa_i - kappa_k) * sigma_inv_;
+
+        if (jacobians[0] != nullptr) {
+            const vect3 dr_dpn = dr_dpe * R_en_;
+            jacobians[0][0] = dr_dpn.i;
+            jacobians[0][1] = dr_dpn.j;
+            jacobians[0][2] = dr_dpn.k;
+
+            const vect3 dr_dphi =
+                (dr_dpe * R_en_ * R_bn) * (-askew(t_ant_));
+            projPhiToQAmbient(dr_dphi, q, &jacobians[0][3]);
+        }
+        if (jacobians[1] != nullptr) {
+            jacobians[1][0] = -LAMBDA_WL * sigma_inv_;
+        }
+        return true;
+    }
+
+    DDObs  dd_;
+    vect3  base_pos_, p0_, t_ant_;
+    mat3   R_en_;
+    double sigma_inv_;
+};
+
+/* ============================================================================
+ * 因子：双差窄巷 NL（1 维）
+ * dd_L_NL = (f1·dd_L1 + f2·dd_L2) / (f1 + f2)  (cycle)
+ * 残差：r = (λ_NL·dd_L_NL - dd_ρ - λ_NL·N_NL) / σ_NL
+ * ==========================================================================*/
+struct GnssDDNarrowLaneResidual : public ceres::CostFunction {
+    GnssDDNarrowLaneResidual(const DDObs& dd, const vect3& base_pos,
+                             const mat3& R_en, const vect3& p0,
+                             const vect3& t_ant, double sigma_nl)
+        : dd_(dd), base_pos_(base_pos), R_en_(R_en), p0_(p0), t_ant_(t_ant) {
+        sigma_inv_ = 1.0 / std::max(sigma_nl, 1e-4);
+        set_num_residuals(1);
+        mutable_parameter_block_sizes()->push_back(7);
+        mutable_parameter_block_sizes()->push_back(1);
+    }
+
+    bool Evaluate(const double* const* params,
+                  double* residuals, double** jacobians) const override {
+        const double* pose = params[0];
+        const double* amb  = params[1];
+
+        const vect3 p_n(pose[0], pose[1], pose[2]);
+        const quat  q  (pose[6], pose[3], pose[4], pose[5]);
+        const mat3  R_bn = q2mat(q);
+        const vect3 p_e  = p0_ + R_en_ * (p_n + R_bn * t_ant_);
+
+        const vect3 si = dd_.sat_i.pos_ecef - p_e;
+        const vect3 sk = dd_.sat_k.pos_ecef - p_e;
+        const double rho_i = norm(si);
+        const double rho_k = norm(sk);
+        if (rho_i < 1e-6 || rho_k < 1e-6) { residuals[0] = 0.0; return true; }
+
+        const vect3 bi = dd_.sat_i.pos_ecef - base_pos_;
+        const vect3 bk = dd_.sat_k.pos_ecef - base_pos_;
+        const double dd_rho = (rho_i - rho_k) - (norm(bi) - norm(bk));
+
+        const double f1 = GPS_FREQ[0].freq_hz;
+        const double f2 = GPS_FREQ[1].freq_hz;
+        const double dd_L_NL = (f1 * dd_.dd_L[0] + f2 * dd_.dd_L[1])
+                             / (f1 + f2);
+
+        residuals[0] = (LAMBDA_NL * dd_L_NL - dd_rho
+                        - LAMBDA_NL * amb[0]) * sigma_inv_;
+
+        if (jacobians == nullptr) return true;
+
+        const vect3 kappa_i = si / rho_i;
+        const vect3 kappa_k = sk / rho_k;
+        const vect3 dr_dpe  = (kappa_i - kappa_k) * sigma_inv_;
+
+        if (jacobians[0] != nullptr) {
+            const vect3 dr_dpn = dr_dpe * R_en_;
+            jacobians[0][0] = dr_dpn.i;
+            jacobians[0][1] = dr_dpn.j;
+            jacobians[0][2] = dr_dpn.k;
+
+            const vect3 dr_dphi =
+                (dr_dpe * R_en_ * R_bn) * (-askew(t_ant_));
+            projPhiToQAmbient(dr_dphi, q, &jacobians[0][3]);
+        }
+        if (jacobians[1] != nullptr) {
+            jacobians[1][0] = -LAMBDA_NL * sigma_inv_;
+        }
+        return true;
+    }
+
+    DDObs  dd_;
+    vect3  base_pos_, p0_, t_ant_;
+    mat3   R_en_;
+    double sigma_inv_;
+};
+
+/* ============================================================================
+ * 因子：双差 IF 载波（1 维）
+ * dd_L_IF = α·λ1·dd_L1 + β·λ2·dd_L2   (m)
+ * 残差：r = (dd_L_IF - dd_ρ - N_IF) / σ_IF
+ * ==========================================================================*/
+struct GnssDDIFCarrierResidual : public ceres::CostFunction {
+    GnssDDIFCarrierResidual(const DDObs& dd, const vect3& base_pos,
+                            const mat3& R_en, const vect3& p0,
+                            const vect3& t_ant, double sigma_if)
+        : dd_(dd), base_pos_(base_pos), R_en_(R_en), p0_(p0), t_ant_(t_ant) {
+        sigma_inv_ = 1.0 / std::max(sigma_if, 1e-3);
+        set_num_residuals(1);
+        mutable_parameter_block_sizes()->push_back(7);
+        mutable_parameter_block_sizes()->push_back(1);
+    }
+
+    bool Evaluate(const double* const* params,
+                  double* residuals, double** jacobians) const override {
+        const double* pose = params[0];
+        const double* amb  = params[1];
+
+        const vect3 p_n(pose[0], pose[1], pose[2]);
+        const quat  q  (pose[6], pose[3], pose[4], pose[5]);
+        const mat3  R_bn = q2mat(q);
+        const vect3 p_e  = p0_ + R_en_ * (p_n + R_bn * t_ant_);
+
+        const vect3 si = dd_.sat_i.pos_ecef - p_e;
+        const vect3 sk = dd_.sat_k.pos_ecef - p_e;
+        const double rho_i = norm(si);
+        const double rho_k = norm(sk);
+        if (rho_i < 1e-6 || rho_k < 1e-6) { residuals[0] = 0.0; return true; }
+
+        const vect3 bi = dd_.sat_i.pos_ecef - base_pos_;
+        const vect3 bk = dd_.sat_k.pos_ecef - base_pos_;
+        const double dd_rho = (rho_i - rho_k) - (norm(bi) - norm(bk));
+
+        const double L1_m = GPS_FREQ[0].lambda * dd_.dd_L[0];
+        const double L2_m = GPS_FREQ[1].lambda * dd_.dd_L[1];
+        const double dd_L_IF = ALPHA_IF * L1_m + BETA_IF * L2_m;
+
+        residuals[0] = (dd_L_IF - dd_rho - amb[0]) * sigma_inv_;
+
+        if (jacobians == nullptr) return true;
+
+        const vect3 kappa_i = si / rho_i;
+        const vect3 kappa_k = sk / rho_k;
+        const vect3 dr_dpe  = (kappa_i - kappa_k) * sigma_inv_;
+
+        if (jacobians[0] != nullptr) {
+            const vect3 dr_dpn = dr_dpe * R_en_;
+            jacobians[0][0] = dr_dpn.i;
+            jacobians[0][1] = dr_dpn.j;
+            jacobians[0][2] = dr_dpn.k;
+
+            const vect3 dr_dphi =
+                (dr_dpe * R_en_ * R_bn) * (-askew(t_ant_));
+            projPhiToQAmbient(dr_dphi, q, &jacobians[0][3]);
+        }
+        if (jacobians[1] != nullptr) {
+            jacobians[1][0] = -sigma_inv_;
+        }
+        return true;
+    }
+
+    DDObs  dd_;
+    vect3  base_pos_, p0_, t_ant_;
+    mat3   R_en_;
+    double sigma_inv_;
+};
+
+/* ============================================================================
+ * 因子：钟差随机游走（1 维）
+ * 参数块：clk_prev[1] · drift_prev[1] · clk_curr[1]
+ * 残差：r = (clk_curr - clk_prev - drift_prev·dt) / σ
+ * ==========================================================================*/
+struct ClockBiasRWFactor : public ceres::CostFunction {
+    ClockBiasRWFactor(double dt, double sigma_m)
+        : dt_(dt), sigma_inv_(1.0 / std::max(sigma_m, 0.1)) {
+        set_num_residuals(1);
+        mutable_parameter_block_sizes()->push_back(1);
+        mutable_parameter_block_sizes()->push_back(1);
+        mutable_parameter_block_sizes()->push_back(1);
+    }
+    bool Evaluate(const double* const* params,
+                  double* residuals, double** jacobians) const override {
+        residuals[0] = (params[2][0] - params[0][0]
+                        - params[1][0] * dt_) * sigma_inv_;
+        if (jacobians == nullptr) return true;
+        if (jacobians[0]) jacobians[0][0] = -sigma_inv_;
+        if (jacobians[1]) jacobians[1][0] = -dt_ * sigma_inv_;
+        if (jacobians[2]) jacobians[2][0] =  sigma_inv_;
+        return true;
+    }
+    double dt_, sigma_inv_;
+};
+
+/* ============================================================================
+ * 因子：钟漂随机游走（1 维）
+ * 参数块：drift_prev[1] · drift_curr[1]
+ * ==========================================================================*/
+struct ClockDriftRWFactor : public ceres::CostFunction {
+    explicit ClockDriftRWFactor(double sigma_mps)
+        : sigma_inv_(1.0 / std::max(sigma_mps, 0.01)) {
+        set_num_residuals(1);
+        mutable_parameter_block_sizes()->push_back(1);
+        mutable_parameter_block_sizes()->push_back(1);
+    }
+    bool Evaluate(const double* const* params,
+                  double* residuals, double** jacobians) const override {
+        residuals[0] = (params[1][0] - params[0][0]) * sigma_inv_;
+        if (jacobians == nullptr) return true;
+        if (jacobians[0]) jacobians[0][0] = -sigma_inv_;
+        if (jacobians[1]) jacobians[1][0] =  sigma_inv_;
+        return true;
+    }
+    double sigma_inv_;
+};
+
+/* ============================================================================
+ * 因子：模糊度软固定（1 维）
+ * 参数块：amb[1]
+ * 残差：r = (amb - N_int) / σ_fix
+ * ==========================================================================*/
+struct AmbiguityFixFactor : public ceres::CostFunction {
+    explicit AmbiguityFixFactor(double N_int, double sigma_fix = 1.0e-3)
+        : N_int_(N_int), sigma_inv_(1.0 / sigma_fix) {
+        set_num_residuals(1);
+        mutable_parameter_block_sizes()->push_back(1);
+    }
+    bool Evaluate(const double* const* params,
+                  double* residuals, double** jacobians) const override {
+        residuals[0] = (params[0][0] - N_int_) * sigma_inv_;
+        if (jacobians && jacobians[0]) jacobians[0][0] = sigma_inv_;
+        return true;
+    }
+    double N_int_, sigma_inv_;
+};
+
+
 struct FrameCompare {
     double time = 0.0;
 
@@ -1802,6 +2323,21 @@ struct RunnerOptions {
     double      visual_huber = 1.0;
     std::string cam_dir;                  /* 图像目录（离线预处理用） */
     CameraModel cam_model{};              /* 相机内参 */
+
+    bool   use_gnss_raw      {false};
+    bool   use_gnss_dd       {false};
+    bool   fix_ambiguity     {false};
+    int    max_freq          {2};
+    bool   use_wl_nl         {false};
+    bool   use_if_combination{false};
+    double wl_sigma          {0.05};
+    double nl_sigma          {0.01};
+    double if_sigma          {0.02};
+    vect3  gnss_ant_lever    {0.0, 0.0, 0.0};
+    vect3  base_pos_ecef     {0.0, 0.0, 0.0};
+    std::string rinex_obs_path;
+    std::string rinex_nav_path;
+    std::string rinex_base_path;
 };
 
 struct RunnerStats {
@@ -1919,6 +2455,20 @@ public:
         double visual_huber  = 1.0;
         double inv_depth_min = 1.0 / 500.0;
         double inv_depth_max = 1.0 / 0.5;
+
+        bool   use_gnss_pseudorange{false};
+        bool   use_gnss_doppler    {false};
+        bool   use_gnss_dd         {false};
+        bool   fix_ambiguity       {false};
+        int    max_freq            {2};
+        bool   use_wl_nl           {false};
+        bool   use_if_combination  {false};
+        double wl_sigma            {0.05};
+        double nl_sigma            {0.01};
+        double if_sigma            {0.02};
+        double clk_rw_sigma        {1.0e-3};
+        double clk_drift_rw_sigma  {1.0e-4};
+        vect3  gnss_ant_lever       {0.0, 0.0, 0.0};
     };
 
     GraphOptimizer() = default;
@@ -1944,6 +2494,14 @@ public:
     std::map<int, double>&       invDepths()       { return inv_depths_; }
     const std::map<int, double>& invDepths() const { return inv_depths_; }
 
+    void setFrameContext(const mat3& R_en, const vect3& p0_ecef) {
+        R_en_m3_ = R_en; p0_ecef_v3_ = p0_ecef;
+    }
+    void setBasePosEcef(const vect3& p) { base_pos_v3_ = p; }
+
+    bool extractAmbiguityCovariance(ceres::Problem& problem, Eigen::MatrixXd& Q_NN);
+    std::map<int, std::array<double, 1>>& ambiguities() { return ambiguities_; }
+
 private:
     /* 组装 Ceres 问题：把 frames 的所有因子加进去 */
     void buildProblem(ceres::Problem &problem, std::vector<Frame> &frames,  const vect3 &g_n);
@@ -1957,6 +2515,11 @@ private:
     vect r_prior_;   /*< 上一次边缘化的先验信息向量 */
     std::array<double, NUM_CALIB> calib_data_{};
     std::map<int, double> inv_depths_;
+
+    mat3  R_en_m3_{1, 0, 0, 0, 1, 0, 0, 0, 1};
+    vect3 p0_ecef_v3_{0.0, 0.0, 0.0};
+    vect3 base_pos_v3_{0.0, 0.0, 0.0};
+    std::map<int, std::array<double, 1>> ambiguities_;
 
 public:
     /* 求解统计（供上层评估计算量与收敛性） */

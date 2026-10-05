@@ -1701,6 +1701,17 @@ void LocalFrame::init(const vect3 &blh0) {
     eth_.Update(blh0_, O31);
     gravity_ = eth_.gn;
     init_    = true;
+
+    const double sl = std::sin(blh0.i), cl = std::cos(blh0.j != 0.0 ? blh0.j : 0.0);
+    /* 实际应写成： */
+    const double lat = blh0.i, lon = blh0.j;
+    const double sl_ = std::sin(lat), cl_ = std::cos(lat);
+    const double so_ = std::sin(lon), co_ = std::cos(lon);
+    R_en_m3_.set(-so_, -sl_*co_,  cl_*co_,
+                co_, -sl_*so_,  cl_*so_,
+                0.0,       cl_,       sl_);
+    p0_ecef_v3_ = blh2xyz(blh0);
+
 }
 
 vect3 LocalFrame::blh2neu(const vect3 &blh) const {
@@ -2801,6 +2812,174 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
             }
         }
     }
+
+    /* ============================================================================
+    * GNSS 紧组合因子（多频）
+    * ==========================================================================*/
+    if (opt_.use_gnss_dd) {
+        const int nf = std::min(std::max(opt_.max_freq, 1), MAX_FREQ);
+
+        for (size_t k = 0; k < frames.size(); ++k) {
+            auto& f = frames[k];
+            if (!f.has_gnss_raw) continue;
+
+            problem.AddParameterBlock(f.clk_bias.data(),  1);
+            problem.AddParameterBlock(f.clk_drift.data(), 1);
+
+            /* 模糊度容器 */
+            f.amb_values.resize(f.dd_obs.size());
+            f.amb_fixed .resize(f.dd_obs.size());
+            f.amb_wl_values.resize(f.dd_obs.size(), 0.0);
+            f.amb_wl_fixed .resize(f.dd_obs.size(), false);
+            f.amb_if_values.resize(f.dd_obs.size(), 0.0);
+            f.amb_if_fixed .resize(f.dd_obs.size(), false);
+
+            for (size_t j = 0; j < f.dd_obs.size(); ++j) {
+                const auto& dd = f.dd_obs[j];
+                f.amb_values[j].fill(0.0);
+                f.amb_fixed [j].fill(false);
+
+                /* ---- 逐频：伪距 + 载波 ---- */
+                for (int fi = 0; fi < nf; ++fi) {
+                    if (!dd.has_P[fi] && !dd.has_L[fi]) continue;
+
+                    if (dd.has_P[fi]) {
+                        auto* cost = new GnssDDPseudorangeFreqResidual(
+                            dd, fi, base_pos_v3_, R_en_m3_, p0_ecef_v3_,
+                            opt_.gnss_ant_lever);
+                        problem.AddResidualBlock(cost, nullptr, f.pose.data());
+                    }
+
+                    if (dd.has_L[fi]) {
+                        const int key = ambKey(dd.ref_sat, dd.sat, fi);
+                        auto it = ambiguities_.find(key);
+                        if (it == ambiguities_.end()) {
+                            ambiguities_[key] = {0.0};
+                            it = ambiguities_.find(key);
+                        }
+                        double* amb = it->second.data();
+                        problem.AddParameterBlock(amb, 1);
+                        problem.SetParameterLowerBound(amb, 0, -1.0e4);
+                        problem.SetParameterUpperBound(amb, 0,  1.0e4);
+
+                        auto* cost = new GnssDDCarrierFreqResidual(
+                            dd, fi, base_pos_v3_, R_en_m3_, p0_ecef_v3_,
+                            opt_.gnss_ant_lever);
+                        problem.AddResidualBlock(cost, nullptr,
+                                                f.pose.data(), amb);
+
+                        if (opt_.fix_ambiguity && f.amb_fixed[j][fi]) {
+                            auto* fix = new AmbiguityFixFactor(
+                                std::round(f.amb_values[j][fi]), 1.0e-3);
+                            problem.AddResidualBlock(fix, nullptr, amb);
+                        }
+                    }
+                }
+
+                /* ---- WL / NL ---- */
+                if (opt_.use_wl_nl && nf >= 2 &&
+                    dd.has_L[0] && dd.has_L[1]) {
+
+                    const int key_wl = ambKey(dd.ref_sat, dd.sat, 100);
+                    auto it_wl = ambiguities_.find(key_wl);
+                    if (it_wl == ambiguities_.end()) {
+                        ambiguities_[key_wl] = {0.0};
+                        it_wl = ambiguities_.find(key_wl);
+                    }
+                    double* amb_wl = it_wl->second.data();
+                    problem.AddParameterBlock(amb_wl, 1);
+
+                    auto* wl = new GnssDDWideLaneResidual(
+                        dd, base_pos_v3_, R_en_m3_, p0_ecef_v3_,
+                        opt_.gnss_ant_lever, opt_.wl_sigma);
+                    problem.AddResidualBlock(wl, nullptr,
+                                            f.pose.data(), amb_wl);
+
+                    if (opt_.fix_ambiguity && f.amb_wl_fixed[j]) {
+                        auto* fix = new AmbiguityFixFactor(
+                            std::round(f.amb_wl_values[j]), 1.0e-3);
+                        problem.AddResidualBlock(fix, nullptr, amb_wl);
+                    }
+
+                    const int key_nl = ambKey(dd.ref_sat, dd.sat, 200);
+                    auto it_nl = ambiguities_.find(key_nl);
+                    if (it_nl == ambiguities_.end()) {
+                        ambiguities_[key_nl] = {0.0};
+                        it_nl = ambiguities_.find(key_nl);
+                    }
+                    double* amb_nl = it_nl->second.data();
+                    problem.AddParameterBlock(amb_nl, 1);
+
+                    auto* nl = new GnssDDNarrowLaneResidual(
+                        dd, base_pos_v3_, R_en_m3_, p0_ecef_v3_,
+                        opt_.gnss_ant_lever, opt_.nl_sigma);
+                    problem.AddResidualBlock(nl, nullptr,
+                                            f.pose.data(), amb_nl);
+                }
+
+                /* ---- IF ---- */
+                if (opt_.use_if_combination && nf >= 2 &&
+                    dd.has_L[0] && dd.has_L[1]) {
+
+                    const int key_if = ambKey(dd.ref_sat, dd.sat, 300);
+                    auto it_if = ambiguities_.find(key_if);
+                    if (it_if == ambiguities_.end()) {
+                        ambiguities_[key_if] = {0.0};
+                        it_if = ambiguities_.find(key_if);
+                    }
+                    double* amb_if = it_if->second.data();
+                    problem.AddParameterBlock(amb_if, 1);
+
+                    auto* iff = new GnssDDIFCarrierResidual(
+                        dd, base_pos_v3_, R_en_m3_, p0_ecef_v3_,
+                        opt_.gnss_ant_lever, opt_.if_sigma);
+                    problem.AddResidualBlock(iff, nullptr,
+                                            f.pose.data(), amb_if);
+                }
+            }
+
+            /* 钟差 / 钟漂 RW（相邻帧） */
+            if (k + 1 < frames.size() && frames[k + 1].has_gnss_raw) {
+                const double dt = frames[k + 1].time - f.time;
+                if (dt > 0.0) {
+                    auto* rw = new ClockBiasRWFactor(dt, opt_.clk_rw_sigma);
+                    problem.AddResidualBlock(rw, nullptr,
+                                            f.clk_bias.data(),
+                                            f.clk_drift.data(),
+                                            frames[k + 1].clk_bias.data());
+
+                    auto* dw = new ClockDriftRWFactor(opt_.clk_drift_rw_sigma);
+                    problem.AddResidualBlock(dw, nullptr,
+                                            f.clk_drift.data(),
+                                            frames[k + 1].clk_drift.data());
+                }
+            }
+        }
+    }
+    
+}
+
+bool GraphOptimizer::extractAmbiguityCovariance(ceres::Problem& problem,
+                                                Eigen::MatrixXd& Q_NN) {
+    std::vector<double*> amb_ptrs;
+    for (auto& [key, arr] : ambiguities_) amb_ptrs.push_back(arr.data());
+    const int n = static_cast<int>(amb_ptrs.size());
+    if (n == 0) return false;
+
+    ceres::Covariance::Options cov_opt;
+    cov_opt.algorithm_type  = ceres::DENSE_SVD;
+    cov_opt.null_space_rank = -1;
+    ceres::Covariance covariance(cov_opt);
+
+    std::vector<std::pair<const double*, const double*>> blocks;
+    for (auto* p : amb_ptrs) blocks.push_back({p, p});
+    if (!covariance.Compute(blocks, &problem)) return false;
+
+    Q_NN.resize(n, n);
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j)
+            covariance.GetCovarianceBlock(amb_ptrs[i], amb_ptrs[j], &Q_NN(i, j));
+    return true;
 }
 
 /* ============================================================================
@@ -3096,6 +3275,16 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
     gopt_opt.inv_depth_min = 1.0 / 500.0;
     gopt_opt.inv_depth_max = 1.0 / 0.5;
 
+    gopt_opt.use_gnss_dd        = opt.use_gnss_dd;
+    gopt_opt.fix_ambiguity      = opt.fix_ambiguity;
+    gopt_opt.max_freq           = opt.max_freq;
+    gopt_opt.use_wl_nl          = opt.use_wl_nl;
+    gopt_opt.use_if_combination = opt.use_if_combination;
+    gopt_opt.wl_sigma           = opt.wl_sigma;
+    gopt_opt.nl_sigma           = opt.nl_sigma;
+    gopt_opt.if_sigma           = opt.if_sigma;
+    gopt_opt.gnss_ant_lever     = opt.gnss_ant_lever;
+
     if (const char *it = std::getenv("IPOS3_MAX_ITER")) {
         gopt_opt.max_iterations = std::atoi(it);
     }
@@ -3120,6 +3309,9 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
         calib.yaw_gnss_offset = opt.yaw_offset;
     }
     gopt.setCalibState(calib);
+
+    gopt.setFrameContext(lf.R_en_m3(), lf.p0Ecef_v3());
+    gopt.setBasePosEcef(opt.base_pos_ecef);
 
     auto evalFrameCompare = [&gopt](const Frame &f) {
         FrameCompare c;

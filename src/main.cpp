@@ -66,6 +66,11 @@ static void printUsage(const char *exe) {
                 "             --cam-intrin=fx,fy,cx,cy,k1,k2,p1,p2\n"
                 "             --visual-sigma=<归一化平面标准差> --visual-huber=<Huber δ>\n");
     std::printf("  GNSS 中断: --gap=<t0>:<t1>\n");
+
+    std::printf("  GNSS紧组合: --gnss-dd --rtk-fix --max-freq=<1|2|3> --wl-nl\n"
+            "             --if-combination --wl-sigma=<m> --nl-sigma=<m>\n"
+            "             --if-sigma=<m> --rinex-obs=<O> --rinex-nav=<N>\n"
+            "             --rinex-base=<O> --base-pos=<x,y,z>\n");
 }
 
 static bool parseAntMode(const std::string &s, int &mode) {
@@ -201,6 +206,26 @@ int main(int argc, char *argv[]) {
                 opt.visual_sigma = std::atof(val.c_str());
             } else if (key == "--visual-huber") {
                 opt.visual_huber = std::atof(val.c_str());
+            } else if (key == "--gnss-dd") {
+                opt.use_gnss_dd  = true;
+                opt.use_gnss_raw = true;
+                opt.use_gnss_vel = false;
+                opt.use_gnss_yaw = false;
+            } else if (key == "--rtk-fix")        { opt.fix_ambiguity = true; }
+            else if (key == "--max-freq")       { opt.max_freq = std::atoi(val.c_str()); }
+            else if (key == "--wl-nl")          { opt.use_wl_nl = true; }
+            else if (key == "--if-combination") { opt.use_if_combination = true; }
+            else if (key == "--wl-sigma")       { opt.wl_sigma = std::atof(val.c_str()); }
+            else if (key == "--nl-sigma")       { opt.nl_sigma = std::atof(val.c_str()); }
+            else if (key == "--if-sigma")       { opt.if_sigma = std::atof(val.c_str()); }
+            else if (key == "--rinex-obs")      { opt.rinex_obs_path = val; }
+            else if (key == "--rinex-nav")      { opt.rinex_nav_path = val; }
+            else if (key == "--rinex-base")     { opt.rinex_base_path = val; }
+            else if (key == "--base-pos") {
+                double x = 0, y = 0, z = 0;
+                if (std::sscanf(val.c_str(), "%lf,%lf,%lf", &x, &y, &z) == 3) {
+                    opt.base_pos_ecef = vect3(x, y, z);
+                }
             }
         }
         switch (n_positional++) {
