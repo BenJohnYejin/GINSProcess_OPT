@@ -50,10 +50,6 @@
 #include "alg_lib.h" 
 
 
-#define CC180C360(yaw)  ( (yaw)>0.0 ? (_2PI-(yaw)) : -(yaw) )   // counter-clockwise +-180deg -> clockwise 0~360deg for yaw
-#define C360CC180(yaw)  ( (yaw)>=PI ? (_2PI-(yaw)) : -(yaw) )   // clockwise 0~360deg -> counter-clockwise +-180deg for yaw
-
-
 static void printUsage(const char *exe) {
     std::printf("用法: %s <xxx.bin> [最大帧数] [输出.nav] [逐帧对比.csv] [选项...]\n", exe);
     std::printf("选项:\n");

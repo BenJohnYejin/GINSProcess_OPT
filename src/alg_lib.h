@@ -135,6 +135,9 @@ enum AntMode {
     ANT_MODE_ONE  = 4,  /*< 单天线，航向不可用 */
 };
 
+#define CC180C360(yaw)  ( (yaw)>0.0 ? (_2PI-(yaw)) : -(yaw) )   // counter-clockwise +-180deg -> clockwise 0~360deg for yaw
+#define C360CC180(yaw)  ( (yaw)>=PI ? (_2PI-(yaw)) : -(yaw) )   // clockwise 0~360deg -> counter-clockwise +-180deg for yaw
+
 class mat3;
 class quat;
 class mat;   
@@ -822,7 +825,7 @@ struct Frame {
     vect3  odo_omega_meas{};          /*< 该段陀螺原始测量 (rad/s)，用于杆臂补偿 */
     double odo_std{0.05};             /*< 里程速度标准差 (m/s) */
 
-    std::vector<VisualObs> visual_obs;   /* 新增 */
+    std::vector<VisualObs> visual_obs;
 };
 
 /* ============================================================================
@@ -851,29 +854,24 @@ public:
     }
 
     bool PlusJacobian(const double *x, double *jacobian) const override {
-        /* PoseManifold 的切空间是 6 维，ambient 是 7 维：
-        *   切空间 δ = [δp(3), δφ(3)]
-        *   ambient = [p(3), qx, qy, qz, qw]
-        * 输出缓冲区是 7×6 的 RowMajor 矩阵。 */
         Eigen::Map<Eigen::Matrix<double, 7, 6, Eigen::RowMajor>> J(jacobian);
         J.setZero();
-
-        /* 位置部分：∂p/∂δp = I_3 */
         J.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity();
 
-        /* 旋转部分：q' = q ⊗ Exp(δφ)，在 δφ = 0 处 ∂q/∂δφ = 0.5·Q(q)
-        * 但 pose 中四元数顺序是 [qx, qy, qz, qw]，需要重排行序： */
         const double qx = x[3], qy = x[4], qz = x[5], qw = x[6];
+        /* ∂q/∂δφ = 0.5 · [ -q_v  q_w I + [q_v]× ]  转置到 [x,y,z,w] 顺序 */
+        Eigen::Matrix<double, 4, 3> dq_dphi;
+        dq_dphi << -qx, -qy, -qz,
+                    qw, -qz,  qy,
+                    qz,  qw, -qx,
+                   -qy,  qx,  qw;
+        dq_dphi *= 0.5;
 
-        /* 与 Ceres 内置 QuaternionManifold 一致：
-        *   ∂qx/∂δφ = 0.5·( qw, -qz,  qy)
-        *   ∂qy/∂δφ = 0.5·( qz,  qw, -qx)
-        *   ∂qz/∂δφ = 0.5·(-qy,  qx,  qw)
-        *   ∂qw/∂δφ = 0.5·(-qx, -qy, -qz)  */
-        J(3, 3) =  0.5 * qw; J(3, 4) = -0.5 * qz; J(3, 5) =  0.5 * qy;
-        J(4, 3) =  0.5 * qz; J(4, 4) =  0.5 * qw; J(4, 5) = -0.5 * qx;
-        J(5, 3) = -0.5 * qy; J(5, 4) =  0.5 * qx; J(5, 5) =  0.5 * qw;
-        J(6, 3) = -0.5 * qx; J(6, 4) = -0.5 * qy; J(6, 5) = -0.5 * qz;
+        /* dq_dphi 行序 [w, x, y, z]，pose 的 [x, y, z, w] */
+        J.block<1, 3>(3, 3) = dq_dphi.row(1);   // pose[3] = qx
+        J.block<1, 3>(4, 3) = dq_dphi.row(2);   // pose[4] = qy
+        J.block<1, 3>(5, 3) = dq_dphi.row(3);   // pose[5] = qz
+        J.block<1, 3>(6, 3) = dq_dphi.row(0);   // pose[6] = qw
         return true;
     }
     bool Minus(const double *y, const double *x, double *y_minus_x) const override {
@@ -1762,7 +1760,7 @@ struct RunnerOptions {
      * yaw_offset 是天线安装角（rad），等价于原工程的 conf_GNSSAgle。 */
     /* 默认 FB_F：与 ipos3g_cmake/src/nav.cpp 里这台设备的配置一致
      * （configPara.ant_mode = Ant_Mode_FB_F, conf_GNSSAgle = 0）。 */
-    int    ant_mode           = ANT_MODE_LR_R;  /*< AntMode，见上 */
+    int    ant_mode           = ANT_MODE_LR_L;  /*< AntMode，见上 */
     double yaw_offset         = 0.0;   /*< 天线安装角 (rad) */
     bool   init_yaw_from_gnss = true;  /*< 初始姿态用双天线航向（不再固定 yaw0=0） */
 

@@ -2976,6 +2976,7 @@ static quat initAttitudeFromYaw(double yaw) {
 double gnssYaw2AttYaw(double raw_yaw, int ant_mode, double yaw_offset) {
     const double PI_2 = PI * 0.5;
     double r = raw_yaw;
+    r = C360CC180(r);   /* 归一到 [-180,180] */
     switch (ant_mode) {
         case ANT_MODE_LR_L: r = diffYaw(r, -PI_2); break;
         case ANT_MODE_LR_R: r = diffYaw(r,  PI_2); break;
