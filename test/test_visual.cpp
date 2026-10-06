@@ -250,9 +250,9 @@ static void test_calib_manifold_plus_minus_inverse() {
                      0.01, -0.02, 0.03, 0.998 };
     /* 归一化 x 的四元数部分 */
     {
-        quat q(x[13], x[10], x[11], x[12]);
-        normlize(&q);
-        x[10] = q.q1; x[11] = q.q2; x[12] = q.q3; x[13] = q.q0;
+        Eigen::Quaterniond q(x[13], x[10], x[11], x[12]);
+        normlize(q);
+        x[10] = q.x(); x[11] = q.y(); x[12] = q.z(); x[13] = q.w();
     }
 
     double delta[13] = { 0.01, -0.02, 0.03, 0.1, -0.2, 0.3, -0.4,
@@ -321,7 +321,7 @@ static void test_calib_manifold_minus_jacobian() {
 
 static void test_visual_residual_zero_same_frame() {
     /* 两帧位姿相同、外参单位、观测相同 → 残差必为 0 */
-    vect3 obs(0.1, -0.2, 1.0);
+    Eigen::Vector3d obs(0.1, -0.2, 1.0);
     VisualReprojResidual f(obs, obs, 1.0);
 
     double pose_i[7] = { 0, 0, 0, 0, 0, 0, 1 };
@@ -341,8 +341,8 @@ static void test_visual_residual_reproj() {
      * 特征在帧 i 的 z=2m 处：obs_i = (0,0,1)，ρ = 0.5
      * 投影到帧 j：Z_c2 = 2-1 = 1 → obs_j = (0,0,1)
      * 残差应为 0 */
-    vect3 obs_i(0.0, 0.0, 1.0);
-    vect3 obs_j(0.0, 0.0, 1.0);
+    Eigen::Vector3d obs_i(0.0, 0.0, 1.0);
+    Eigen::Vector3d obs_j(0.0, 0.0, 1.0);
     VisualReprojResidual f(obs_i, obs_j, 1.0);
 
     double pose_i[7] = { 0, 0, 0, 0, 0, 0, 1 };
@@ -360,8 +360,8 @@ static void test_visual_residual_reproj() {
 static void test_visual_residual_off_center() {
     /* 特征在帧 i 的 (1, 2, 2)：obs_i = (0.5, 1.0, 1)
      * 帧 j 平移 +z 1m：Z_c2 = 1，obs_j 仍为 (1.0, 2.0, 1.0)，残差 0 */
-    vect3 obs_i(0.5, 1.0, 1.0);
-    vect3 obs_j(1.0, 2.0, 1.0);
+    Eigen::Vector3d obs_i(0.5, 1.0, 1.0);
+    Eigen::Vector3d obs_j(1.0, 2.0, 1.0);
     VisualReprojResidual f(obs_i, obs_j, 1.0);
 
     double pose_i[7] = { 0, 0, 0, 0, 0, 0, 1 };
@@ -386,26 +386,26 @@ struct VisJacFixture {
     double pose_j[7];
     double calib[NUM_CALIB];
     double inv_d[1];
-    vect3  obs_i, obs_j;
+    Eigen::Vector3d  obs_i, obs_j;
     double sigma;
 
     VisJacFixture() {
-        obs_i = vect3(0.12, -0.20, 1.0);
-        obs_j = vect3(0.18, -0.16, 1.0);
+        obs_i = Eigen::Vector3d(0.12, -0.20, 1.0);
+        obs_j = Eigen::Vector3d(0.18, -0.16, 1.0);
         sigma = 1.0;
 
-        quat qi = a2qua(vect3(0.05, -0.10, 0.30));
-        quat qj = a2qua(vect3(0.08,  0.02, 0.25));
+        Eigen::Quaterniond qi = a2qua(Eigen::Vector3d(0.05, -0.10, 0.30));
+        Eigen::Quaterniond qj = a2qua(Eigen::Vector3d(0.08,  0.02, 0.25));
         pose_i[0] = 1.0;  pose_i[1] = -0.5;  pose_i[2] = 0.2;
-        pose_i[3] = qi.q1; pose_i[4] = qi.q2; pose_i[5] = qi.q3; pose_i[6] = qi.q0;
+        pose_i[3] = qi.x(); pose_i[4] = qi.y(); pose_i[5] = qi.z(); pose_i[6] = qi.w();
         pose_j[0] = 2.0;  pose_j[1] = 0.3;   pose_j[2] = -0.1;
-        pose_j[3] = qj.q1; pose_j[4] = qj.q2; pose_j[5] = qj.q3; pose_j[6] = qj.q0;
+        pose_j[3] = qj.x(); pose_j[4] = qj.y(); pose_j[5] = qj.z(); pose_j[6] = qj.w();
 
         for (int k = 0; k < NUM_CALIB; k++) calib[k] = 0.0;
         calib[7]  = 0.05;  calib[8] = -0.02;  calib[9] = 0.01;
-        quat qb = rv2q(vect3(0.02, -0.01, 0.03));
-        calib[10] = qb.q1; calib[11] = qb.q2;
-        calib[12] = qb.q3; calib[13] = qb.q0;
+        Eigen::Quaterniond qb = rv2q(Eigen::Vector3d(0.02, -0.01, 0.03));
+        calib[10] = qb.x(); calib[11] = qb.y();
+        calib[12] = qb.z(); calib[13] = qb.w();
 
         inv_d[0] = 0.4;
     }
@@ -559,6 +559,18 @@ static void test_visual_frontend_first_frame() {
     EXPECT_EQ((int)ids.size(), (int)feats.size());
 }
 
+/* 2x3 仿射矩阵 [1 0 tx; 0 1 ty]。
+ *
+ * 注意：不要再用 `cv::Mat_<double>(2,3) << 1,0,tx,0,1,ty` 这种逗号初始化 ——
+ * OpenCV 5 已移除 MatCommaInitializer（Mat_::operator<<），在 OpenCV 5.1 上
+ * 该写法直接编译失败。下面这种显式构造在 OpenCV 4/5 上都可用。 */
+static cv::Mat makeTranslation(double tx, double ty) {
+    cv::Mat M = cv::Mat::eye(2, 3, CV_64F);
+    M.at<double>(0, 2) = tx;
+    M.at<double>(1, 2) = ty;
+    return M;
+}
+
 static void test_visual_frontend_tracking() {
     CameraModel cam;
     cam.fx = 460.0; cam.fy = 460.0;
@@ -573,7 +585,7 @@ static void test_visual_frontend_tracking() {
 
     /* 帧 2：整体平移 (5, 3) 像素 */
     cv::Mat img2;
-    cv::Mat M = (cv::Mat_<double>(2,3) << 1, 0, 5, 0, 1, 3);
+    cv::Mat M = makeTranslation(5.0, 3.0);
     cv::warpAffine(img1, img2, M, img1.size(), cv::INTER_LINEAR,
                    cv::BORDER_CONSTANT, cv::Scalar(255));
 
@@ -632,7 +644,7 @@ static void test_preprocess_images_from_files() {
     const long long t0_ns = 1403636579000000000LL;
     for (int k = 0; k < 4; k++) {
         cv::Mat img = makeSyntheticGrid();
-        cv::Mat M = (cv::Mat_<double>(2,3) << 1, 0, k, 0, 1, k);
+        cv::Mat M = makeTranslation((double)k, (double)k);
         cv::Mat shifted;
         cv::warpAffine(img, shifted, M, img.size(), cv::INTER_LINEAR,
                        cv::BORDER_CONSTANT, cv::Scalar(255));
@@ -649,7 +661,7 @@ static void test_preprocess_images_from_files() {
     for (const auto& kv : table) {
         if (!kv.second.empty()) n_nonempty++;
         for (const auto& obs : kv.second) {
-            EXPECT_NEAR(obs.xyz_c.k, 1.0, 1e-12);
+            EXPECT_NEAR(obs.xyz_c.z(), 1.0, 1e-12);
             EXPECT_TRUE(obs.sigma > 0.0);
         }
     }
@@ -682,23 +694,23 @@ static void test_visual_factor_ceres_convergence() {
     const double rho_gt = 0.4;
 
     /* 复现 Evaluate 内部的投影链，算 obs_j 应为什么 */
-    quat qi(fx.pose_i[6], fx.pose_i[3], fx.pose_i[4], fx.pose_i[5]);
-    quat qj(fx.pose_j[6], fx.pose_j[3], fx.pose_j[4], fx.pose_j[5]);
-    quat qb(fx.calib[13], fx.calib[10], fx.calib[11], fx.calib[12]);
-    vect3 ti(fx.pose_i[0], fx.pose_i[1], fx.pose_i[2]);
-    vect3 tj(fx.pose_j[0], fx.pose_j[1], fx.pose_j[2]);
-    vect3 t_bc(fx.calib[7], fx.calib[8], fx.calib[9]);
+    Eigen::Quaterniond qi(fx.pose_i[6], fx.pose_i[3], fx.pose_i[4], fx.pose_i[5]);
+    Eigen::Quaterniond qj(fx.pose_j[6], fx.pose_j[3], fx.pose_j[4], fx.pose_j[5]);
+    Eigen::Quaterniond qb(fx.calib[13], fx.calib[10], fx.calib[11], fx.calib[12]);
+    Eigen::Vector3d ti(fx.pose_i[0], fx.pose_i[1], fx.pose_i[2]);
+    Eigen::Vector3d tj(fx.pose_j[0], fx.pose_j[1], fx.pose_j[2]);
+    Eigen::Vector3d t_bc(fx.calib[7], fx.calib[8], fx.calib[9]);
 
-    quat  q_wc_i = qi * qb;
-    vect3 p_wc_i = ti + qi * t_bc;
-    quat  q_wc_j = qj * qb;
-    vect3 p_wc_j = tj + qj * t_bc;
+    Eigen::Quaterniond  q_wc_i = qi * qb;
+    Eigen::Vector3d p_wc_i = ti + qi * t_bc;
+    Eigen::Quaterniond  q_wc_j = qj * qb;
+    Eigen::Vector3d p_wc_j = tj + qj * t_bc;
 
     const double inv_rho = 1.0 / rho_gt;
-    vect3 P_c_i(fx.obs_i.i * inv_rho, fx.obs_i.j * inv_rho, inv_rho);
-    vect3 P_w   = p_wc_i + q_wc_i * P_c_i;
-    vect3 P_c_j = (~q_wc_j) * (P_w - p_wc_j);
-    vect3 obs_j_gt(P_c_j.i / P_c_j.k, P_c_j.j / P_c_j.k, 1.0);
+    Eigen::Vector3d P_c_i(fx.obs_i.x() * inv_rho, fx.obs_i.y() * inv_rho, inv_rho);
+    Eigen::Vector3d P_w   = p_wc_i + q_wc_i * P_c_i;
+    Eigen::Vector3d P_c_j = ((q_wc_j.conjugate())) * (P_w - p_wc_j);
+    Eigen::Vector3d obs_j_gt(P_c_j.x() / P_c_j.z(), P_c_j.y() / P_c_j.z(), 1.0);
 
     VisualReprojResidual* cost =
         new VisualReprojResidual(fx.obs_i, obs_j_gt, fx.sigma);

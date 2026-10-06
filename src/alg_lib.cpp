@@ -3,7 +3,7 @@
  * @brief 算法库实现
  *
  * 分节顺序与 alg_lib.h 的目录一致（自上而下）：
- *   1. 基础类型           vect3 / mat3 / quat / vect / mat
+ *   1. 基础类型           Vector3d / Matrix3d / Quaterniond（动态向量/矩阵已统一为 Eigen）
  *   2. 标量与矢量工具       range / norm / diffYaw / askew ...
  *   3. 姿态与旋转          a2qua / rv2q / q2mat / m2att ...
  *   4. 线性代数            inv / llt_L / llt_sqrtinv / pinv_sym
@@ -18,871 +18,42 @@
 
 #include "alg_lib.h"
 /* ---------- 全局常量 ---------- */
-vect3 O31(0.0);
-vect3 One31(1.0);
-mat3 I33(1, 0, 0, 0, 1, 0, 0, 0, 1);
-quat qI(1, 0, 0, 0);
 
 /* ============================================================================
- * vect3
+ * Vector3d
  * ==========================================================================*/
-int vect3::IsZeros(const vect3 &v, double eps) const { return ::IsZeros(v, eps); }
-
-bool vect3::IsZeroXY(const vect3 &v, double eps) const {
-    return (v.i < eps && v.i > -eps && v.j < eps && v.j > -eps);
-}
-
-bool vect3::IsNaN(const vect3 &v) const {
-    return std::isnan(v.i) || std::isnan(v.j) || std::isnan(v.k);
-}
-
-vect3 &vect3::operator=(double f) {
-    i = j = k = f;
-    return *this;
-}
-
-vect3 &vect3::operator=(const double *pf) {
-    i = pf[0];
-    j = pf[1];
-    k = pf[2];
-    return *this;
-}
-
-vect3 vect3::operator+(const vect3 &v) const { return vect3(toEigen() + v.toEigen()); }
-
-vect3 vect3::operator-(const vect3 &v) const { return vect3(toEigen() - v.toEigen()); }
-
-vect3 vect3::operator*(const vect3 &v) const { return vect3(toEigen().cross(v.toEigen())); }
-
-vect3 vect3::operator*(double f) const { return vect3(toEigen() * f); }
-
-vect3 vect3::operator*(const mat3 &m) const {
-    /* 与 ipos3g 一致：3x1 视作 1x3 行向量后右乘矩阵，即 v^T * M */
-    Eigen::RowVector3d r = toEigen().transpose() * m.e();
-    return vect3(r(0), r(1), r(2));
-}
-
-vect3 vect3::operator/(double f) const { return vect3(toEigen() / f); }
-
-vect3 vect3::operator/(const vect3 &v) const {
-    return vect3(toEigen().cwiseQuotient(v.toEigen()));
-}
-
-vect3 &vect3::operator+=(const vect3 &v) {
-    e() += v.toEigen();
-    return *this;
-}
-
-vect3 &vect3::operator-=(const vect3 &v) {
-    e() -= v.toEigen();
-    return *this;
-}
-
-vect3 &vect3::operator*=(double f) {
-    e() *= f;
-    return *this;
-}
-
-vect3 &vect3::operator/=(double f) {
-    e() /= f;
-    return *this;
-}
-
-vect3 &vect3::operator/=(const vect3 &v) {
-    e() = e().cwiseQuotient(v.toEigen());
-    return *this;
-}
-
-vect3 operator*(double f, const vect3 &v) { return vect3(v.toEigen() * f); }
-
-vect3 operator-(const vect3 &v) { return vect3(-v.toEigen()); }
-
 /* ============================================================================
- * mat3
+ * Matrix3d
  * ==========================================================================*/
 
 /* 从 double / float 数组按行主序构造 ----------------------------------------------*/
-mat3::mat3(const double *pxyz) {
-    set(pxyz[0], pxyz[1], pxyz[2], pxyz[3], pxyz[4], pxyz[5], pxyz[6], pxyz[7], pxyz[8]);
-}
-
-mat3::mat3(const float *pxyz) {
-    set(pxyz[0], pxyz[1], pxyz[2], pxyz[3], pxyz[4], pxyz[5], pxyz[6], pxyz[7], pxyz[8]);
-}
-
 /* 由三个矢量构造：isrow=1 时按行，否则按列 -----------------------------------------*/
-mat3::mat3(const vect3 &v0, const vect3 &v1, const vect3 &v2, bool isrow) {
-    if (isrow) {
-        set(v0.i, v0.j, v0.k, v1.i, v1.j, v1.k, v2.i, v2.j, v2.k);
-    } else {
-        set(v0.i, v1.i, v2.i, v0.j, v1.j, v2.j, v0.k, v1.k, v2.k);
-    }
-}
-
-mat3::mat3(const Eigen::Matrix3d &m) {
-    set(m(0, 0), m(0, 1), m(0, 2), m(1, 0), m(1, 1), m(1, 2), m(2, 0), m(2, 1), m(2, 2));
-}
-
-mat3 mat3::operator+(const mat3 &m) const { return mat3(e() + m.e()); }
-
-mat3 mat3::operator-(const mat3 &m) const { return mat3(e() - m.e()); }
-
-mat3 mat3::operator*(const mat3 &m) const { return mat3(e() * m.e()); }
-
-mat3 mat3::operator*(double f) const { return mat3(e() * f); }
-
-vect3 mat3::operator*(const vect3 &v) const { return vect3(e() * v.toEigen()); }
-
-mat3 &mat3::operator+=(const mat3 &m) {
-    e() += m.e();
-    return *this;
-}
-
 /* v 加到对角线 -------------------------------------------------------------------*/
-mat3 mat3::operator+(const vect3 &v) const {
-    mat3 mtmp = *this;
-    mtmp.e00 += v.i;
-    mtmp.e11 += v.j;
-    mtmp.e22 += v.k;
-    return mtmp;
-}
-
-mat3 &mat3::operator+=(const vect3 &v) {
-    e00 += v.i;
-    e11 += v.j;
-    e22 += v.k;
-    return *this;
-}
-
-void mat3::SetRow(int i, const vect3 &v) {
-    double *p = &e00 + i * 3;
-    p[0] = v.i;
-    p[1] = v.j;
-    p[2] = v.k;
-}
-
-void mat3::SetClm(int i, const vect3 &v) {
-    double *p = &e00 + i;
-    p[0] = v.i;
-    p[3] = v.j;
-    p[6] = v.k;
-}
-
-vect3 mat3::GetRow(int i) const {
-    const double *p = &e00 + i * 3;
-    return vect3(p[0], p[1], p[2]);
-}
-
-vect3 mat3::GetClm(int i) const {
-    const double *p = &e00 + i;
-    return vect3(p[0], p[3], p[6]);
-}
-
-mat3 operator-(const mat3 &m) { return mat3(-m.e()); }
-
-mat3 operator~(const mat3 &m) { return mat3(m.e().transpose()); }
-
-mat3 operator*(double f, const mat3 &m) { return mat3(m.e() * f); }
-
-double &mat3::operator()(int i, int j ) {
-    int r = i, c = (j < 0) ? i : j;
-    switch (r * 3 + c) {
-        case 0: return e00; case 1: return e01; case 2: return e02;
-        case 3: return e10; case 4: return e11; case 5: return e12;
-        case 6: return e20; case 7: return e21; case 8: return e22;
-        default: return e00;
-    }
-}
-double mat3::operator()(int i, int j ) const {
-    int r = i, c = (j < 0) ? i : j;
-    switch (r * 3 + c) {
-        case 0: return e00; case 1: return e01; case 2: return e02;
-        case 3: return e10; case 4: return e11; case 5: return e12;
-        case 6: return e20; case 7: return e21; case 8: return e22;
-        default: return e00;
-    }
-}
-
 /* ============================================================================
- * quat
+ * Quaterniond
  * ==========================================================================*/
-
-quat quat::operator+(const vect3 &phi) const { return rv2q(-phi) * (*this); }
-
-quat quat::operator-(const vect3 &phi) const { return rv2q(phi) * (*this); }
 
 /* 失准角：与 ipos3g 一致，dq = quat * ~(*this) -----------------------------------*/
-vect3 quat::operator-(const quat &quat0) const {
-    quat dq = quat0 * (~(*this));
-    if (dq.q0 < 0) {
-        dq.q0 = -dq.q0;
-        dq.q1 = -dq.q1;
-        dq.q2 = -dq.q2;
-        dq.q3 = -dq.q3;
-    }
-    double n2 = std::acos(range(dq.q0, -1.0, 1.0)), f;
-    if (sign(n2) != 0) {
-        f = 2.0 / (std::sin(n2) / n2);
-    } else {
-        f = 2.0;
-    }
-    return vect3(dq.q1, dq.q2, dq.q3) * f;
-}
-
-quat quat::operator*(const quat &quat0) const { return quat(toEigen() * quat0.toEigen()); }
-
-quat &quat::operator*=(const quat &quat0) {
-    *this = *this * quat0;
-    return *this;
-}
-
-quat &quat::operator-=(const vect3 &phi) {
-    *this = rv2q(phi) * (*this);
-    return *this;
-}
-
-quat operator~(const quat &q) { return quat(q.q0, -q.q1, -q.q2, -q.q3); }
-
 /* 用四元数旋转矢量：Cnb * v --------------------------------------------------------*/
-vect3 quat::operator*(const vect3 &v) const { return vect3(toEigen() * v.toEigen()); }
-
-void quat::SetYaw(double yaw) {
-    vect3 att = q2att(*this);
-    att.k     = yaw;
-    *this     = a2qua(att);
-}
-
-void normlize(quat *q) {
-    double nq = std::sqrt(q->q0 * q->q0 + q->q1 * q->q1 + q->q2 * q->q2 + q->q3 * q->q3);
-    q->q0 /= nq;
-    q->q1 /= nq;
-    q->q2 /= nq;
-    q->q3 /= nq;
-}
-
-
-
-void vect::resize(int r, int c) {
-    row = r;
-    clm = c;
-    rc  = r * c;
-    if (rc > 0) {
-        E.resize(r, c);
-    } else {
-        /* 保持 dd 合法，避免空对象出现悬垂指针 */
-        E.resize(1, 1);
+void normlize(Eigen::Quaterniond &q) {
+    double nq = std::sqrt(q.w() * q.w() + q.x() * q.x() + q.y() * q.y() + q.z() * q.z());
+    /* 零范数保护：调用方可能传入未初始化的四元数（例如 calib 的 q_bc
+     * 默认全 0 而忘了 setCalibState），此时 0/0 会传播成 NaN 并毁掉
+     * 所有依赖四元数的残差。退化成单位四元数。 */
+    if (!(nq > 1.0e-12)) {
+        q.w() = 1.0; q.x() = 0.0; q.y() = 0.0; q.z() = 0.0;
+        return;
     }
-    bind();
+    q.w() /= nq;
+    q.x() /= nq;
+    q.y() /= nq;
+    q.z() /= nq;
 }
 
-vect::vect(void) : row(0), clm(0), rc(0), dd(nullptr) { resize(0, 0); }
 
-vect::vect(int row0, int clm0) : dd(nullptr) {
-    /* 与 ipos3g 一致：clm0==1 时是列向量，否则退化为行向量 */
-    if (clm0 == 1) {
-        resize(row0, 1);
-    } else {
-        resize(1, clm0);
-    }
-    E.setZero();
-}
-
-vect::vect(int row0, double f) : dd(nullptr) {
-    resize(row0, 1);
-    E.setConstant(f);
-}
-
-vect::vect(int row0, double f, double f1, ...) : dd(nullptr) {
-    resize(row0, 1);
-    E.setZero();
-    dd[0] = f;
-    va_list vl;
-    va_start(vl, f1);
-    double cur = f1;
-    for (int i = 1; i < rc; i++) {
-        if (isInfSentinel(cur)) {
-            break;
-        }
-        dd[i] = cur;
-        if (i + 1 < rc) {
-            cur = va_arg(vl, double);
-        }
-    }
-    va_end(vl);
-}
-
-vect::vect(int row0, const double *pf) : dd(nullptr) {
-    resize(row0, 1);
-    std::memcpy(dd, pf, rc * sizeof(double));
-}
-
-vect::vect(const vect3 &v) : dd(nullptr) {
-    resize(3, 1);
-    dd[0] = v.i;
-    dd[1] = v.j;
-    dd[2] = v.k;
-}
-
-vect::vect(const vect3 &v1, const vect3 v2) : dd(nullptr) {
-    resize(6, 1);
-    dd[0] = v1.i;
-    dd[1] = v1.j;
-    dd[2] = v1.k;
-    dd[3] = v2.i;
-    dd[4] = v2.j;
-    dd[5] = v2.k;
-}
-
-vect::vect(const Eigen::VectorXd &v) : dd(nullptr) {
-    resize(static_cast<int>(v.size()), 1);
-    std::memcpy(dd, v.data(), rc * sizeof(double));
-}
-
-vect::vect(const vect &o) : row(o.row), clm(o.clm), rc(o.rc), E(o.E), dd(nullptr) { bind(); }
-
-vect &vect::operator=(const vect &o) {
-    if (this == &o) {
-        return *this;
-    }
-    row = o.row;
-    clm = o.clm;
-    rc  = o.rc;
-    E   = o.E;
-    if (rc == 0 && E.size() == 0) {
-        E.resize(1, 1);
-    }
-    bind();
-    return *this;
-}
-
-void vect::Set(double f[], int size) {
-    int j = 0;
-    for (int i = 0; i < rc && j < size; i++, j++) {
-        if (isInfSentinel(f[j])) {
-            break;
-        }
-        dd[i] = f[j];
-    }
-}
-
-void vect::Set2(double f[], int size) {
-    int j = 0;
-    for (int i = 0; i < rc && j < size; i++, j++) {
-        if (isInfSentinel(f[j])) {
-            break;
-        }
-        dd[i] = f[j] * f[j];
-    }
-}
-
-void vect::SetVect3(int i, const vect3 &v) {
-    dd[i]     = v.i;
-    dd[i + 1] = v.j;
-    dd[i + 2] = v.k;
-}
-
-void vect::Set2Vect3(int i, const vect3 &v) {
-    dd[i++] = v.i * v.i;
-    dd[i++] = v.j * v.j;
-    dd[i]   = v.k * v.k;
-}
-
-void vect::SetBit(unsigned int bit, double f) {
-    for (int i = 0; i < rc; i++) {
-        if (bit & (0x01u << i)) {
-            dd[i] = f;
-        }
-    }
-}
-
-void vect::SetBit(unsigned int bit, const vect3 &v) {
-    const double *p = &v.i;
-    for (int i = 0; i < rc; i++) {
-        if (bit & (0x01u << i)) {
-            dd[i] = *p++;
-            if (p > &v.k) {
-                p = &v.i;
-            }
-        }
-    }
-}
-
-vect3 vect::GetVect3(int i) const { return vect3(dd[i], dd[i + 1], dd[i + 2]); }
-
-vect vect::operator+(const vect &v) const {
-    assert(row == v.row && clm == v.clm);
-    vect vtmp(row, clm);
-    vtmp.e() = e() + v.e();
-    return vtmp;
-}
-
-vect vect::operator-(const vect &v) const {
-    assert(row == v.row && clm == v.clm);
-    vect vtmp(row, clm);
-    vtmp.e() = e() - v.e();
-    return vtmp;
-}
-
-vect vect::operator*(double f) const {
-    vect vtmp(row, clm);
-    vtmp.e() = e() * f;
-    return vtmp;
-}
-
-vect &vect::operator=(double f) {
-    E.setConstant(f);
-    return *this;
-}
-
-vect &vect::operator=(const double *pf) {
-    std::memcpy(dd, pf, rc * sizeof(double));
-    return *this;
-}
-
-vect &vect::operator=(const mat3 &m) {
-    resize(9, 1);
-    std::memcpy(dd, &m.e00, 9 * sizeof(double));
-    return *this;
-}
-
-vect &vect::operator+=(const vect &v) {
-    assert(row == v.row && clm == v.clm);
-    e() += v.e();
-    return *this;
-}
-
-vect &vect::operator-=(const vect &v) {
-    assert(row == v.row && clm == v.clm);
-    e() -= v.e();
-    return *this;
-}
-
-vect &vect::operator*=(double f) {
-    e() *= f;
-    return *this;
-}
-
-/* 外积：v(1xn) * w(nx1) -> (1x1)；v(nx1) * w(1xm) -> (nxm) ----------------------*/
-mat vect::operator*(const vect &v) const {
-    assert(clm == v.row);
-    if (row == 1 && v.clm == 1) {
-        mat mtmp(1, 1);
-        mtmp.dd[0] = dot(*this, v);
-        return mtmp;
-    }
-    mat mtmp(row, v.clm);
-    mtmp.e() = e() * v.e();
-    return mtmp;
-}
-
-vect operator~(const vect &v) {
-    vect vtmp = v;
-    /* 数据保持不变，仅交换形状（rc 不变） */
-    vtmp.row = v.clm;
-    vtmp.clm = v.row;
-    return vtmp;
-}
-
-/* ============================================================================
- * mat
- * ==========================================================================*/
-void mat::resize(int r, int c) {
-    row = r;
-    clm = c;
-    rc  = r * c;
-    if (rc > 0) {
-        E.resize(r, c);
-    } else {
-        E.resize(1, 1);
-    }
-    bind();
-}
-
-mat::mat(void) : row(0), clm(0), rc(0), dd(nullptr) { resize(0, 0); }
-
-mat::mat(int row0, int clm0) : dd(nullptr) {
-    resize(row0, clm0);
-    E.setZero();
-}
-
-mat::mat(int row0, int clm0, double f) : dd(nullptr) {
-    resize(row0, clm0);
-    E.setConstant(f);
-}
-
-mat::mat(int row0, int clm0, double f, double f1, ...) : dd(nullptr) {
-    resize(row0, clm0);
-    E.setZero();
-    double cur = f;
-    va_list vl;
-    va_start(vl, f1);
-    for (int i = 0; i < rc; i++) {
-        if (isInfSentinel(cur)) {
-            break;
-        }
-        dd[i] = cur;
-        if (i + 1 < rc) {
-            cur = (i == 0) ? f1 : va_arg(vl, double);
-        }
-    }
-    va_end(vl);
-}
-
-mat::mat(int row0, int clm0, const double *pf) : dd(nullptr) {
-    resize(row0, clm0);
-    std::memcpy(dd, pf, rc * sizeof(double));
-}
-
-mat::mat(const Eigen::MatrixXd &m) : dd(nullptr) {
-    resize(static_cast<int>(m.rows()), static_cast<int>(m.cols()));
-    e() = m;
-}
-
-mat::mat(const mat &o) : row(o.row), clm(o.clm), rc(o.rc), E(o.E), dd(nullptr) { bind(); }
-
-mat &mat::operator=(const mat &o) {
-    if (this == &o) {
-        return *this;
-    }
-    row = o.row;
-    clm = o.clm;
-    rc  = o.rc;
-    E   = o.E;
-    if (rc == 0 && E.size() == 0) {
-        E.resize(1, 1);
-    }
-    bind();
-    return *this;
-}
-
-void mat::Clear(void) { E.setZero(); }
-
-void mat::SetDiag(double f[], int len) {
-    E.setZero();
-    for (int i = 0, k = 0; i < row && i < clm && k < len; i++, k++) {
-        if (isInfSentinel(f[k])) {
-            break;
-        }
-        dd[i * clm + i] = f[k];
-    }
-}
-
-void mat::SetDiag2(double f[], int len) {
-    E.setZero();
-    for (int i = 0, k = 0; i < row && i < clm && k < len; i++, k++) {
-        if (isInfSentinel(f[k])) {
-            break;
-        }
-        dd[i * clm + i] = f[k] * f[k];
-    }
-}
-
-mat mat::operator+(const mat &m) const {
-    assert(row == m.row && clm == m.clm);
-    mat mtmp(row, clm);
-    mtmp.e() = e() + m.e();
-    return mtmp;
-}
-
-mat mat::operator-(const mat &m) const {
-    assert(row == m.row && clm == m.clm);
-    mat mtmp(row, clm);
-    mtmp.e() = e() - m.e();
-    return mtmp;
-}
-
-mat mat::operator*(double f) const {
-    mat mtmp(row, clm);
-    mtmp.e() = e() * f;
-    return mtmp;
-}
-
-vect mat::operator*(const vect &v) const {
-    assert(clm == v.row);
-    vect vtmp(row);
-    vtmp.e() = e() * v.e();
-    return vtmp;
-}
-
-mat mat::operator*(const mat &m) const {
-    assert(clm == m.row);
-    mat mtmp(row, m.clm);
-    mtmp.e() = e() * m.e();
-    return mtmp;
-}
-
-mat &mat::operator=(double f) {
-    E.setConstant(f);
-    return *this;
-}
-
-mat &mat::operator+=(const mat &m) {
-    assert(row == m.row && clm == m.clm);
-    e() += m.e();
-    return *this;
-}
-
-/* 把向量加到对角线上（与 ipos3g 一致） ---------------------------------------------*/
-mat &mat::operator+=(const vect &v) {
-    assert(row == v.row || clm == v.clm);
-    int n = std::min(std::min(row, clm), v.rc);
-    for (int k = 0; k < n; k++) {
-        dd[k * clm + k] += v.dd[k];
-    }
-    return *this;
-}
-
-mat &mat::operator-=(const mat &m) {
-    assert(row == m.row && clm == m.clm);
-    e() -= m.e();
-    return *this;
-}
-
-mat &mat::operator*=(double f) {
-    e() *= f;
-    return *this;
-}
-
-/* 对角线 +1 ----------------------------------------------------------------------*/
-mat &mat::operator++() {
-    for (int i = 0; i < row && i < clm; i++) {
-        dd[i * clm + i] += 1.0;
-    }
-    return *this;
-}
-
-void mat::ZeroRow(int i) {
-    double *p = &dd[i * clm];
-    for (int j = 0; j < clm; j++) {
-        p[j] = 0.0;
-    }
-}
-
-void mat::ZeroClm(int j) {
-    double *p = &dd[j];
-    for (int i = 0; i < row; i++, p += clm) {
-        *p = 0.0;
-    }
-}
-
-void mat::SetRow(int i, double f, ...) {
-    va_list vl;
-    va_start(vl, f);
-    double *p = &dd[i * clm];
-    double cur = f;
-    for (int j = 0; j < clm; j++) {
-        p[j] = cur;
-        if (j + 1 < clm) {
-            cur = va_arg(vl, double);
-        }
-    }
-    va_end(vl);
-}
-
-void mat::SetRow(int i, const vect &v) {
-    assert(clm == v.clm);
-    std::memcpy(&dd[i * clm], v.dd, static_cast<size_t>(clm) * sizeof(double));
-}
-
-void mat::SetClm(int j, double f[], int len) {
-    double *p = &dd[j];
-    for (int i = 0; i < row && i < len; i++, p += clm) {
-        *p = f[i];
-    }
-}
-
-void mat::SetClm(int j, const vect &v) {
-    assert(row == v.row);
-    double *p = &dd[j];
-    for (int i = 0; i < row; i++, p += clm) {
-        *p = v.dd[i];
-    }
-}
-
-vect mat::GetRow(int i) const {
-    vect v(1, clm);
-    std::memcpy(v.dd, &dd[i * clm], static_cast<size_t>(clm) * sizeof(double));
-    return v;
-}
-
-void mat::GetRow(vect &v, int i) {
-    v = vect(1, clm);
-    std::memcpy(v.dd, &dd[i * clm], static_cast<size_t>(clm) * sizeof(double));
-}
 
-vect mat::GetClm(int j) const {
-    vect v(row, 1);
-    const double *p1 = &dd[j];
-    for (int i = 0; i < row; i++, p1 += clm) {
-        v.dd[i] = *p1;
-    }
-    return v;
-}
-
-void mat::GetClm(vect &v, int j) {
-    v = vect(row, 1);
-    const double *p1 = &dd[j];
-    for (int i = 0; i < row; i++, p1 += clm) {
-        v.dd[i] = *p1;
-    }
-}
-
-void mat::SetRowVect3(int i, int j, const vect3 &v) {
-    double *p = &dd[i * clm + j];
-    p[0]      = v.i;
-    p[1]      = v.j;
-    p[2]      = v.k;
-}
-
-void mat::SetRowVect3(int i, int j, const vect3 &v, const vect3 &v1) {
-    double *p = &dd[i * clm + j];
-    p[0]      = v.i;
-    p[1]      = v.j;
-    p[2]      = v.k;
-    p[3]      = v1.i;
-    p[4]      = v1.j;
-    p[5]      = v1.k;
-}
-
-void mat::SetRowVect3(int i, int j, const vect3 &v, const vect3 &v1, const vect3 &v2) {
-    double *p = &dd[i * clm + j];
-    p[0]      = v.i;
-    p[1]      = v.j;
-    p[2]      = v.k;
-    p[3]      = v1.i;
-    p[4]      = v1.j;
-    p[5]      = v1.k;
-    p[6]      = v2.i;
-    p[7]      = v2.j;
-    p[8]      = v2.k;
-}
-
-void mat::SetClmVect3(int i, int j, const vect3 &v) {
-    double *p = &dd[i * clm + j];
-    p[0]      = v.i;
-    p[clm]    = v.j;
-    p[2 * clm] = v.k;
-}
-
-void mat::SetClmVect3(int i, int j, const vect3 &v, const vect3 &v1) {
-    double *p = &dd[i * clm + j];
-    p[0] = v.i;  p[1] = v1.i;
-    p += clm;
-    p[0] = v.j;  p[1] = v1.j;
-    p += clm;
-    p[0] = v.k;  p[1] = v1.k;
-}
-
-void mat::SetClmVect3(int i, int j, const vect3 &v, const vect3 &v1, const vect3 &v2) {
-    double *p = &dd[i * clm + j];
-    p[0] = v.i;  p[1] = v1.i;  p[2] = v2.i;
-    p += clm;
-    p[0] = v.j;  p[1] = v1.j;  p[2] = v2.j;
-    p += clm;
-    p[0] = v.k;  p[1] = v1.k;  p[2] = v2.k;
-}
-
-vect3 mat::GetRowVect3(int i, int j) const {
-    const double *p = &dd[i * clm + j];
-    return vect3(p[0], p[1], p[2]);
-}
-
-vect3 mat::GetClmVect3(int i, int j) const {
-    const double *p = &dd[i * clm + j];
-    return vect3(p[0], p[clm], p[2 * clm]);
-}
-
-void mat::SetDiagVect3(int i, int j, const vect3 &v) {
-    double *p = &dd[i * clm + j];
-    *p        = v.i;
-    p += clm + 1;
-    *p = v.j;
-    p += clm + 1;
-    *p = v.k;
-}
-
-vect3 mat::GetDiagVect3(int i, int j) const {
-    if (j == -1) {
-        j = i;
-    }
-    const double *p = &dd[i * clm + j];
-    return vect3(p[0], p[clm + 1], p[2 * (clm + 1)]);
-}
-
-void mat::SetAskew(int i, int j, const vect3 &v) {
-    double *p = &dd[i * clm + j];
-    p[0] = 0.0;  p[1] = -v.k;  p[2] = v.j;
-    p += clm;
-    p[0] = v.k;  p[1] = 0.0;   p[2] = -v.i;
-    p += clm;
-    p[0] = -v.j; p[1] = v.i;   p[2] = 0.0;
-}
-
-void mat::SetMat3(int i, int j, const mat3 &m) {
-    SetRowVect3(i, j, m.GetRow(0));
-    SetRowVect3(i + 1, j, m.GetRow(1));
-    SetRowVect3(i + 2, j, m.GetRow(2));
-}
 
-void mat::SetMat3(int i, int j, const mat3 &m, const mat3 &m1) {
-    double *p = &dd[i * clm + j];
-    for (int k = 0; k < 3; k++) {
-        vect3 r0 = m.GetRow(k), r1 = m1.GetRow(k);
-        p[0] = r0.i;  p[1] = r0.j;  p[2] = r0.k;
-        p[3] = r1.i;  p[4] = r1.j;  p[5] = r1.k;
-        p += clm;
-    }
-}
-
-void mat::SetMat3(int i, int j, const mat3 &m, const mat3 &m1, const mat3 &m2) {
-    double *p = &dd[i * clm + j];
-    for (int k = 0; k < 3; k++) {
-        vect3 r0 = m.GetRow(k), r1 = m1.GetRow(k), r2 = m2.GetRow(k);
-        p[0] = r0.i;  p[1] = r0.j;  p[2] = r0.k;
-        p[3] = r1.i;  p[4] = r1.j;  p[5] = r1.k;
-        p[6] = r2.i;  p[7] = r2.j;  p[8] = r2.k;
-        p += clm;
-    }
-}
-
-mat3 mat::GetMat3(int i, int j) const {
-    if (j == -1) {
-        j = i;
-    }
-    double t[9];
-    const double *p = &dd[i * clm + j];
-    for (int k = 0; k < 3; k++) {
-        for (int n = 0; n < 3; n++) {
-            t[3 * k + n] = p[n];
-        }
-        p += clm;
-    }
-    return mat3(t);
-}
 
-void mat::SubAddMat3(int i, int j, const mat3 &m) {
-    double *p = &dd[i * clm + j];
-    for (int k = 0; k < 3; k++) {
-        vect3 r = m.GetRow(k);
-        p[0] += r.i;
-        p[1] += r.j;
-        p[2] += r.k;
-        p += clm;
-    }
-}
-
-mat operator~(const mat &m) {
-    mat mtmp(m.clm, m.row);
-    mtmp.e() = m.e().transpose();
-    return mtmp;
-}
-
-/* vect3 的 "行向量 × 动态矩阵" 版本（ipos3g 中声明但未实现，这里补全） ---------------*/
-vect3 vect3::operator*(const mat &m) const {
-    assert(m.row == 3);
-    Eigen::RowVectorXd r = toEigen().transpose() * m.e();
-    return vect3(r(0), r(1), r(2));
-}
 
 
 /* ============================================================================
@@ -928,21 +99,21 @@ double normInf(const double *pd, int n) {
 }
 
 /* ============================================================================
- * vect3 工具
+ * Vector3d 工具
  * ==========================================================================*/
 
-int IsZeros(const vect3 &v, double eps) {
-    return (v.i < eps && v.i > -eps && v.j < eps && v.j > -eps && v.k < eps && v.k > -eps);
+int IsZeros(const Eigen::Vector3d &v, double eps) {
+    return (v.x() < eps && v.x() > -eps && v.y() < eps && v.y() > -eps && v.z() < eps && v.z() > -eps);
 }
 
 int IsZero(const double &val, double eps) { return (val < eps && val > -eps); }
 
-uint8_t IsZerosXY(const vect3 &v, double eps) {
-    return (v.i < eps && v.i > -eps && v.j < eps && v.j > -eps);
+uint8_t IsZerosXY(const Eigen::Vector3d &v, double eps) {
+    return (v.x() < eps && v.x() > -eps && v.y() < eps && v.y() > -eps);
 }
 
-uint8_t IsNaN(const vect3 &v) {
-    return (std::isnan(v.i) || std::isnan(v.j) || std::isnan(v.k)) ? 1 : 0;
+uint8_t IsNaN(const Eigen::Vector3d &v) {
+    return (std::isnan(v.x()) || std::isnan(v.y()) || std::isnan(v.z())) ? 1 : 0;
 }
 
 double diffYaw(double yaw, double yaw0) {
@@ -955,55 +126,53 @@ double diffYaw(double yaw, double yaw0) {
     return dyaw;
 }
 
-vect3 abs(const vect3 &v) { return vect3(v.toEigen().cwiseAbs()); }
+Eigen::Vector3d abs(const Eigen::Vector3d &v) { return Eigen::Vector3d(v.cwiseAbs()); }
 
-vect3 maxabs(const vect3 &v1, const vect3 &v2) {
-    return vect3(v1.toEigen().cwiseAbs().cwiseMax(v2.toEigen().cwiseAbs()));
+Eigen::Vector3d maxabs(const Eigen::Vector3d &v1, const Eigen::Vector3d &v2) {
+    return Eigen::Vector3d(v1.cwiseAbs().cwiseMax(v2.cwiseAbs()));
 }
 
-double norm(const vect3 &v) { return v.toEigen().norm(); }
 
-double normInf(const vect3 &v) { return v.toEigen().lpNorm<Eigen::Infinity>(); }
 
-double normXY(const vect3 &v) { return std::sqrt(v.i * v.i + v.j * v.j); }
+double normXY(const Eigen::Vector3d &v) { return std::sqrt(v.x() * v.x() + v.y() * v.y()); }
 
-double normXYInf(const vect3 &v) {
-    double i = v.i > 0 ? v.i : -v.i, j = v.j > 0 ? v.j : -v.j;
+double normXYInf(const Eigen::Vector3d &v) {
+    double i = v.x() > 0 ? v.x() : -v.x(), j = v.y() > 0 ? v.y() : -v.y();
     return i > j ? i : j;
 }
 
-vect3 sqrt(const vect3 &v) { return vect3(v.toEigen().cwiseSqrt()); }
+Eigen::Vector3d sqrt(const Eigen::Vector3d &v) { return Eigen::Vector3d(v.cwiseSqrt()); }
 
-vect3 pow(const vect3 &v, int k) {
-    vect3 pp = v;
+Eigen::Vector3d pow(const Eigen::Vector3d &v, int k) {
+    Eigen::Vector3d pp = v;
     for (int i = 1; i < k; i++) {
-        pp.i *= v.i, pp.j *= v.j, pp.k *= v.k;
+        pp.x() *= v.x(), pp.y() *= v.y(), pp.z() *= v.z();
     }
     return pp;
 }
 
-double dot(const vect3 &v1, const vect3 &v2) { return v1.toEigen().dot(v2.toEigen()); }
+double dot(const Eigen::Vector3d &v1, const Eigen::Vector3d &v2) { return v1.dot(v2); }
 
-vect3 dotmul(const vect3 &v1, const vect3 &v2) {
-    return vect3(v1.toEigen().cwiseProduct(v2.toEigen()));
+Eigen::Vector3d dotmul(const Eigen::Vector3d &v1, const Eigen::Vector3d &v2) {
+    return Eigen::Vector3d(v1.cwiseProduct(v2));
 }
 
-mat3 vxv(const vect3 &v1, const vect3 &v2) {
-    return mat3(v1.toEigen() * v2.toEigen().transpose());
+Eigen::Matrix3d vxv(const Eigen::Vector3d &v1, const Eigen::Vector3d &v2) {
+    return Eigen::Matrix3d(v1 * v2.transpose());
 }
 
-double sinAng(const vect3 &v1, const vect3 &v2) {
+double sinAng(const Eigen::Vector3d &v1, const Eigen::Vector3d &v2) {
     if (IsZeros(v1) || IsZeros(v2)) {
         return 0.0;
     }
-    return norm(v1 * v2) / (norm(v1) * norm(v2));
+    return norm(v1.cross(v2)) / (norm(v1) * norm(v2));
 }
 
-vect3 sort(const vect3 &v) {
-    vect3 s = v;
-    if (s.i < s.j) swapt(s.i, s.j);
-    if (s.i < s.k) swapt(s.i, s.k);
-    if (s.j < s.k) swapt(s.j, s.k);
+Eigen::Vector3d sort(const Eigen::Vector3d &v) {
+    Eigen::Vector3d s = v;
+    if (s.x() < s.y()) swapt(s.x(), s.y());
+    if (s.x() < s.z()) swapt(s.x(), s.z());
+    if (s.y() < s.z()) swapt(s.y(), s.z());
     return s;
 }
 
@@ -1012,16 +181,16 @@ std::mt19937 &rngEngine(void) {
     return engine;
 }
 
-vect3 randn(const vect3 &mu, const vect3 &sigma) {
+Eigen::Vector3d randn(const Eigen::Vector3d &mu, const Eigen::Vector3d &sigma) {
     std::normal_distribution<double> dist(0.0, 1.0);
-    return vect3(mu.i + sigma.i * dist(rngEngine()), mu.j + sigma.j * dist(rngEngine()),
-                 mu.k + sigma.k * dist(rngEngine()));
+    return Eigen::Vector3d(mu.x() + sigma.x() * dist(rngEngine()), mu.y() + sigma.y() * dist(rngEngine()),
+                 mu.z() + sigma.z() * dist(rngEngine()));
 }
 
 double MKQt(double sR, double tau) { return sR * sR * 2.0 / tau; }
 
-vect3 MKQt(const vect3 &sR, const vect3 &tau) {
-    return vect3(sR.i * sR.i * 2.0 / tau.i, sR.j * sR.j * 2.0 / tau.j, sR.k * sR.k * 2.0 / tau.k);
+Eigen::Vector3d MKQt(const Eigen::Vector3d &sR, const Eigen::Vector3d &tau) {
+    return Eigen::Vector3d(sR.x() * sR.x() * 2.0 / tau.x(), sR.y() * sR.y() * 2.0 / tau.y(), sR.z() * sR.z() * 2.0 / tau.z());
 }
 
 /* ============================================================================
@@ -1029,157 +198,160 @@ vect3 MKQt(const vect3 &sR, const vect3 &tau) {
  * ==========================================================================*/
 
 /* 旋转矢量 -> 四元数（小角度用泰勒展开，大角度用 Eigen::AngleAxis） ---------------*/
-quat rv2q(const vect3 &rv) {
-    double n2 = rv.i * rv.i + rv.j * rv.j + rv.k * rv.k;
+Eigen::Quaterniond rv2q(const Eigen::Vector3d &rv) {
+    double n2 = rv.x() * rv.x() + rv.y() * rv.y() + rv.z() * rv.z();
     if (n2 < (DEG * DEG)) {
         double n4 = n2 * n2;
         double c  = 1.0 - n2 * (1.0 / 8.0) + n4 * (1.0 / 384.0);   /*< cos(|rv|/2) */
         double f  = 0.5 - n2 * (1.0 / 48.0) + n4 * (1.0 / 3840.0); /*< sin(|rv|/2)/|rv| */
-        return quat(c, f * rv.i, f * rv.j, f * rv.k);
+        return Eigen::Quaterniond(c, f * rv.x(), f * rv.y(), f * rv.z());
     }
     double th = std::sqrt(n2);
-    return quat(Eigen::Quaterniond(Eigen::AngleAxisd(th, rv.toEigen() / th)));
+    return Eigen::Quaterniond(Eigen::Quaterniond(Eigen::AngleAxisd(th, rv / th)));
 }
 
-mat3 rv2m(const vect3 &rv) { return q2mat(rv2q(rv)); }
+Eigen::Matrix3d rv2m(const Eigen::Vector3d &rv) { return q2mat(rv2q(rv)); }
 
-mat3 q2mat(const quat &qnb) { return mat3(qnb.toEigen().toRotationMatrix()); }
+Eigen::Matrix3d q2mat(const Eigen::Quaterniond &qnb) { return Eigen::Matrix3d(qnb.toRotationMatrix()); }
 
-quat m2qua(const mat3 &Cnb) {
-    Eigen::Quaterniond q(Cnb.e());
+Eigen::Quaterniond m2qua(const Eigen::Matrix3d &Cnb) {
+    Eigen::Quaterniond q(Cnb);
     q.normalize();
     /* 与 ipos3g 一致：固定 q0 >= 0 的分支 */
     if (q.w() < 0) {
         q.coeffs() = -q.coeffs();
     }
-    return quat(q);
+    return Eigen::Quaterniond(q);
 }
 
-mat3 askew(const vect3 &v) {
+Eigen::Matrix3d askew(const Eigen::Vector3d &v) {
     /*
      *      [  0  -k   j ]
      *      [  k   0  -i ]
      *      [ -j   i   0 ]
      */
-    return mat3(0, -v.k, v.j, v.k, 0.0, -v.i, -v.j, v.i, 0);
+    return (Eigen::Matrix3d() << 0, -v.z(), v.y(), v.z(), 0.0, -v.x(), -v.y(), v.x(), 0).finished();
 }
 
 /* 欧拉角 [pitch,roll,yaw] -> Cnb（ipos3g / PSINS 约定，保留闭式） -----------------*/
-mat3 a2mat(const vect3 &att) {
-    double si = std::sin(att.i), ci = std::cos(att.i), sj = std::sin(att.j), cj = std::cos(att.j),
-           sk = std::sin(att.k), ck = std::cos(att.k);
-    return mat3(cj * ck - si * sj * sk, -ci * sk, sj * ck + si * cj * sk,
-                cj * sk + si * sj * ck, ci * ck, sj * sk - si * cj * ck,
-                -ci * sj, si, ci * cj);
+Eigen::Matrix3d a2mat(const Eigen::Vector3d &att) {
+    double si = std::sin(att.x()), ci = std::cos(att.x()), sj = std::sin(att.y()), cj = std::cos(att.y()),
+           sk = std::sin(att.z()), ck = std::cos(att.z());
+    return (Eigen::Matrix3d() << cj * ck - si * sj * sk, -ci * sk, sj * ck + si * cj * sk, cj * sk + si * sj * ck, ci * ck, sj * sk - si * cj * ck, -ci * sj, si, ci * cj).finished();
 }
 
-vect3 m2att(const mat3 &Cnb) {
-    return vect3(asinEx(Cnb.e21), atan2Ex(-Cnb.e20, Cnb.e22), atan2Ex(-Cnb.e01, Cnb.e11));
+Eigen::Vector3d m2att(const Eigen::Matrix3d &Cnb) {
+    return Eigen::Vector3d(asinEx(Cnb(2,1)), atan2Ex(-Cnb(2,0), Cnb(2,2)), atan2Ex(-Cnb(0,1), Cnb(1,1)));
 }
 
 /* 反序欧拉角 -> Cnb（保留闭式） ---------------------------------------------------*/
-mat3 ar2mat(const vect3 &attr) {
-    double si = std::sin(attr.i), ci = std::cos(attr.i), sj = std::sin(attr.j), cj = std::cos(attr.j),
-           sk = std::sin(attr.k), ck = std::cos(attr.k);
-    return mat3(cj * ck, si * sj * ck - ci * sk, ci * sj * ck + si * sk,
-                cj * sk, si * sj * sk + ci * ck, ci * sj * sk - si * ck,
-                -sj, si * cj, ci * cj);
+Eigen::Matrix3d ar2mat(const Eigen::Vector3d &attr) {
+    double si = std::sin(attr.x()), ci = std::cos(attr.x()), sj = std::sin(attr.y()), cj = std::cos(attr.y()),
+           sk = std::sin(attr.z()), ck = std::cos(attr.z());
+    return (Eigen::Matrix3d() << cj * ck, si * sj * ck - ci * sk, ci * sj * ck + si * sk, cj * sk, si * sj * sk + ci * ck, ci * sj * sk - si * ck, -sj, si * cj, ci * cj).finished();
 }
 
-quat ar2qua(const vect3 &attr) { return m2qua(ar2mat(attr)); }
+Eigen::Quaterniond ar2qua(const Eigen::Vector3d &attr) { return m2qua(ar2mat(attr)); }
 
-vect3 m2attr(const mat3 &Cnb) {
-    return vect3(atan2Ex(Cnb.e21, Cnb.e22), asinEx(-Cnb.e20), atan2Ex(Cnb.e10, Cnb.e00));
+Eigen::Vector3d m2attr(const Eigen::Matrix3d &Cnb) {
+    return Eigen::Vector3d(atan2Ex(Cnb(2,1), Cnb(2,2)), asinEx(-Cnb(2,0)), atan2Ex(Cnb(1,0), Cnb(0,0)));
 }
 
-vect3 q2attr(const quat &qnb) { return m2attr(q2mat(qnb)); }
+Eigen::Vector3d q2attr(const Eigen::Quaterniond &qnb) { return m2attr(q2mat(qnb)); }
 
 /* 欧拉角 [pitch,roll,yaw] -> 四元数 -----------------*/
-quat a2qua(double pitch, double roll, double yaw) {
+Eigen::Quaterniond a2qua(double pitch, double roll, double yaw) {
     pitch /= 2.0, roll /= 2.0, yaw /= 2.0;
     double sp = std::sin(pitch), sr = std::sin(roll), sy = std::sin(yaw),
            cp = std::cos(pitch), cr = std::cos(roll), cy = std::cos(yaw);
-    return quat(cp * cr * cy - sp * sr * sy,
+    return Eigen::Quaterniond(cp * cr * cy - sp * sr * sy,
                 sp * cr * cy - cp * sr * sy,
                 cp * sr * cy + sp * cr * sy,
                 cp * cr * sy + sp * sr * cy);
 }
 
-quat a2qua(const vect3 &att) { return a2qua(att.i, att.j, att.k); }
+Eigen::Quaterniond a2qua(const Eigen::Vector3d &att) { return a2qua(att.x(), att.y(), att.z()); }
 
-vect3 q2att(const quat &qnb) {
-    double q11 = qnb.q0 * qnb.q0, q12 = qnb.q0 * qnb.q1, q13 = qnb.q0 * qnb.q2,
-           q14 = qnb.q0 * qnb.q3, q22 = qnb.q1 * qnb.q1, q23 = qnb.q1 * qnb.q2,
-           q24 = qnb.q1 * qnb.q3, q33 = qnb.q2 * qnb.q2, q34 = qnb.q2 * qnb.q3,
-           q44 = qnb.q3 * qnb.q3;
-    return vect3(asinEx(2 * (q34 + q12)), atan2Ex(-2 * (q24 - q13), q11 - q22 - q33 + q44),
+Eigen::Vector3d q2att(const Eigen::Quaterniond &qnb) {
+    double q11 = qnb.w() * qnb.w(), q12 = qnb.w() * qnb.x(), q13 = qnb.w() * qnb.y(),
+           q14 = qnb.w() * qnb.z(), q22 = qnb.x() * qnb.x(), q23 = qnb.x() * qnb.y(),
+           q24 = qnb.x() * qnb.z(), q33 = qnb.y() * qnb.y(), q34 = qnb.y() * qnb.z(),
+           q44 = qnb.z() * qnb.z();
+    return Eigen::Vector3d(asinEx(2 * (q34 + q12)), atan2Ex(-2 * (q24 - q13), q11 - q22 - q33 + q44),
                  atan2Ex(-2 * (q23 - q14), q11 - q22 + q33 - q44));
+}
+
+/* 设置偏航角（保留 pitch/roll）——原 quat::SetYaw 的替代 */
+void setYaw(Eigen::Quaterniond &q, double yaw) {
+    Eigen::Vector3d att = q2att(q);
+    att.z() = yaw;
+    q = a2qua(att);
 }
 #if 0
 /* 四元数 -> 旋转矢量 --------------------------------------------------------------*/
-vect3 q2rv(const quat &q) {
-    quat dq = q;
-    if (dq.q0 < 0) {
-        dq.q0 = -dq.q0, dq.q1 = -dq.q1, dq.q2 = -dq.q2, dq.q3 = -dq.q3;
+Eigen::Vector3d q2rv(const Eigen::Quaterniond &q) {
+    Eigen::Quaterniond dq = q;
+    if (dq.w() < 0) {
+        dq.w() = -dq.w(), dq.x() = -dq.x(), dq.y() = -dq.y(), dq.z() = -dq.z();
     }
-    if (dq.q0 > 1.0) {
-        dq.q0 = 1.0;
+    if (dq.w() > 1.0) {
+        dq.w() = 1.0;
     }
-    double n2 = std::acos(dq.q0), f;
+    double n2 = std::acos(dq.w()), f;
     if (n2 > 1.0e-20) {
         f = 2.0 / (std::sin(n2) / n2);
     } else {
         f = 2.0;
     }
-    return vect3(dq.q1, dq.q2, dq.q3) * f;
+    return Eigen::Vector3d(dq.x(), dq.y(), dq.z()) * f;
 }
 #endif
-vect3 q2rv(const quat &q) {
-    quat dq = q;
-    double n = std::sqrt(dq.q0*dq.q0 + dq.q1*dq.q1 + dq.q2*dq.q2 + dq.q3*dq.q3);
-    if (n > 0.0) { dq.q0 /= n; dq.q1 /= n; dq.q2 /= n; dq.q3 /= n; }
+Eigen::Vector3d q2rv(const Eigen::Quaterniond &q) {
+    Eigen::Quaterniond dq = q;
+    double n = std::sqrt(dq.w()*dq.w() + dq.x()*dq.x() + dq.y()*dq.y() + dq.z()*dq.z());
+    if (n > 0.0) { dq.w() /= n; dq.x() /= n; dq.y() /= n; dq.z() /= n; }
     /* 规范化：让 q0 >= 0；若 q0 == 0，让首个非零虚部 >= 0 */
-    if (dq.q0 < 0.0 ||  (dq.q0 == 0.0 &&(dq.q1 < 0.0 || (dq.q1 == 0.0 && (dq.q2 < 0.0 || (dq.q2 == 0.0 && dq.q3 < 0.0)))))) {
-        dq.q0 = -dq.q0; dq.q1 = -dq.q1; dq.q2 = -dq.q2; dq.q3 = -dq.q3;
+    if (dq.w() < 0.0 ||  (dq.w() == 0.0 &&(dq.x() < 0.0 || (dq.x() == 0.0 && (dq.y() < 0.0 || (dq.y() == 0.0 && dq.z() < 0.0)))))) {
+        dq.w() = -dq.w(); dq.x() = -dq.x(); dq.y() = -dq.y(); dq.z() = -dq.z();
     }
-    double s = std::sqrt(std::max(0.0, 1.0 - dq.q0 * dq.q0));
-    double theta = 2.0 * std::acos(range(dq.q0, -1.0, 1.0));
+    double s = std::sqrt(std::max(0.0, 1.0 - dq.w() * dq.w()));
+    double theta = 2.0 * std::acos(range(dq.w(), -1.0, 1.0));
     double k = (theta < 1.0e-20) ? 2.0 : theta / s;
-    return vect3(dq.q1 * k, dq.q2 * k, dq.q3 * k);
+    return Eigen::Vector3d(dq.x() * k, dq.y() * k, dq.z() * k);
 }
 
 /* 旋转矩阵 -> 旋转矢量 ------------------------------------------------------------*/
-vect3 m2rv(const mat3 &Cnb) {
+Eigen::Vector3d m2rv(const Eigen::Matrix3d &Cnb) {
     double phi = std::acos(range((trace(Cnb) - 1.0) / 2.0, -1.0, 1.0));
     double afa = (-1.0e-10 < phi && phi < 1.0e-10) ? 0.5 : phi / (2.0 * std::sin(phi));
-    return vect3(Cnb.e21 - Cnb.e12, Cnb.e02 - Cnb.e20, Cnb.e10 - Cnb.e01) * afa;
+    return Eigen::Vector3d(Cnb(2,1) - Cnb(1,2), Cnb(0,2) - Cnb(2,0), Cnb(1,0) - Cnb(0,1)) * afa;
 }
 
-vect3 qq2phi(const quat &qcalcu, const quat &qreal) { return q2rv(qreal * (~qcalcu)); }
+Eigen::Vector3d qq2phi(const Eigen::Quaterniond &qcalcu, const Eigen::Quaterniond &qreal) { return q2rv(qreal * ((qcalcu.conjugate()))); }
 
-quat addmu(const quat &q, const vect3 &mu) { return q * rv2q(mu); }
+Eigen::Quaterniond addmu(const Eigen::Quaterniond &q, const Eigen::Vector3d &mu) { return q * rv2q(mu); }
 
-quat UpDown(const quat &q) {
-    vect3 att = q2att(q);
-    att.i     = -att.i;
-    att.j += PI;
+Eigen::Quaterniond UpDown(const Eigen::Quaterniond &q) {
+    Eigen::Vector3d att = q2att(q);
+    att.x()     = -att.x();
+    att.y() += PI;
     return a2qua(att);
 }
 
-vect3 sv2att(const vect3 &fb, double yaw0, const vect3 &fn) {
-    vect3 phi = fb * fn;
+Eigen::Vector3d sv2att(const Eigen::Vector3d &fb, double yaw0, const Eigen::Vector3d &fn) {
+    Eigen::Vector3d phi = fb.cross(fn);
     double afa = std::acos(range(dot(fn, fb) / norm(fn) / norm(fb), -1.0, 1.0)), nphi = norm(phi);
-    vect3 att = q2att(rv2q(phi * (nphi < 1.0e-10 ? 1.0 : afa / nphi)));
-    att.k     = yaw0;
+    Eigen::Vector3d att = q2att(rv2q(phi * (nphi < 1.0e-10 ? 1.0 : afa / nphi)));
+    att.z()     = yaw0;
     return att;
 }
 
-vect3 vn2att(const vect3 &vn) {
+Eigen::Vector3d vn2att(const Eigen::Vector3d &vn) {
     double vel = normXY(vn);
     if (vel < 1.0e-6) {
         return O31;
     }
-    return vect3(std::atan2(vn.k, vel), 0, std::atan2(-vn.i, vn.j));
+    return Eigen::Vector3d(std::atan2(vn.z(), vel), 0, std::atan2(-vn.x(), vn.y()));
 }
 
 double vn2att(double vel_east, double vel_north) {
@@ -1191,61 +363,61 @@ double vn2att(double vel_east, double vel_north) {
 }
 
 /* ============================================================================
- * mat3 线性代数
+ * Matrix3d 线性代数
  * ==========================================================================*/
 
-mat3 Rot(double angle, char axis) {
+Eigen::Matrix3d Rot(double angle, char axis) {
     double s = std::sin(angle), c = std::cos(angle);
     switch (axis) {
     case 'x':
-    case 'X': return mat3(1, 0, 0, 0, c, -s, 0, s, c);
+    case 'X': return (Eigen::Matrix3d() << 1, 0, 0, 0, c, -s, 0, s, c).finished();
     case 'y':
-    case 'Y': return mat3(c, 0, s, 0, 1, 0, -s, 0, c);
-    default: return mat3(c, -s, 0, s, c, 0, 0, 0, 1);
+    case 'Y': return (Eigen::Matrix3d() << c, 0, s, 0, 1, 0, -s, 0, c).finished();
+    default: return (Eigen::Matrix3d() << c, -s, 0, s, c, 0, 0, 0, 1).finished();
     }
 }
 
-mat3 rcijk(const mat3 &m, int ijk) {
+Eigen::Matrix3d rcijk(const Eigen::Matrix3d &m, int ijk) {
     switch (ijk) {
-    case 021: return mat3(m.e00, m.e02, m.e01, m.e20, m.e22, m.e21, m.e10, m.e12, m.e11);
-    case 102: return mat3(m.e11, m.e10, m.e12, m.e01, m.e00, m.e02, m.e21, m.e20, m.e22);
-    case 120: return mat3(m.e11, m.e12, m.e10, m.e21, m.e22, m.e20, m.e01, m.e02, m.e00);
-    case 201: return mat3(m.e22, m.e20, m.e21, m.e02, m.e00, m.e01, m.e12, m.e10, m.e11);
-    case 210: return mat3(m.e22, m.e21, m.e20, m.e12, m.e11, m.e10, m.e02, m.e01, m.e00);
+    case 021: return (Eigen::Matrix3d() << m(0,0), m(0,2), m(0,1), m(2,0), m(2,2), m(2,1), m(1,0), m(1,2), m(1,1)).finished();
+    case 102: return (Eigen::Matrix3d() << m(1,1), m(1,0), m(1,2), m(0,1), m(0,0), m(0,2), m(2,1), m(2,0), m(2,2)).finished();
+    case 120: return (Eigen::Matrix3d() << m(1,1), m(1,2), m(1,0), m(2,1), m(2,2), m(2,0), m(0,1), m(0,2), m(0,0)).finished();
+    case 201: return (Eigen::Matrix3d() << m(2,2), m(2,0), m(2,1), m(0,2), m(0,0), m(0,1), m(1,2), m(1,0), m(1,1)).finished();
+    case 210: return (Eigen::Matrix3d() << m(2,2), m(2,1), m(2,0), m(1,2), m(1,1), m(1,0), m(0,2), m(0,1), m(0,0)).finished();
     default: return m;
     }
 }
 
-double trMMT(const mat3 &m1, const mat3 &m2) {
-    const mat3 &b = (&m2 == &I33) ? m1 : m2;
-    return (m1.e().cwiseProduct(b.e())).sum();
+double trMMT(const Eigen::Matrix3d &m1, const Eigen::Matrix3d &m2) {
+    const Eigen::Matrix3d &b = (&m2 == &I33) ? m1 : m2;
+    return (m1.cwiseProduct(b)).sum();
 }
 
-void symmetry(mat3 &m) {
-    m.e01 = m.e10 = (m.e01 + m.e10) * 0.5;
-    m.e02 = m.e20 = (m.e02 + m.e20) * 0.5;
-    m.e12 = m.e21 = (m.e12 + m.e21) * 0.5;
+void symmetry(Eigen::Matrix3d &m) {
+    m(0,1) = m(1,0) = (m(0,1) + m(1,0)) * 0.5;
+    m(0,2) = m(2,0) = (m(0,2) + m(2,0)) * 0.5;
+    m(1,2) = m(2,1) = (m(1,2) + m(2,1)) * 0.5;
 }
 
-mat3 pow(const mat3 &m, int k) {
-    mat3 mm = m;
+Eigen::Matrix3d pow(const Eigen::Matrix3d &m, int k) {
+    Eigen::Matrix3d mm = m;
     for (int i = 1; i < k; i++) {
         mm = mm * m;
     }
     return mm;
 }
 
-double trace(const mat3 &m) { return m.e().trace(); }
+double trace(const Eigen::Matrix3d &m) { return m.trace(); }
 
-double det(const mat3 &m) { return m.e().determinant(); }
+double det(const Eigen::Matrix3d &m) { return m.determinant(); }
 
-mat3 adj(const mat3 &m) {
+Eigen::Matrix3d adj(const Eigen::Matrix3d &m) {
     /* 不用 Eigen 的 adjugate()：
      *   1) 它靠 EIGEN_MATRIXBASE_PLUGIN 注入到 MatrixBase，
      *      对 Map<> 类型的可见性在不同 3.4.x 版本/包含顺序下不一致；
      *   2) 3x3 伴随矩阵直接展开也就 9 个乘减，没必要依赖库实现。
      * 伴随矩阵定义：A·adj(A) = det(A)·I，元素为代数余子式的转置。 */
-    const Eigen::Matrix3d A = m.e();     /* Map -> 具体矩阵（列主序也可） */
+    const Eigen::Matrix3d A = m;     /* Map -> 具体矩阵（列主序也可） */
     Eigen::Matrix3d a;
     a(0,0) = A(1,1)*A(2,2) - A(1,2)*A(2,1);
     a(0,1) = A(0,2)*A(2,1) - A(0,1)*A(2,2);
@@ -1256,233 +428,144 @@ mat3 adj(const mat3 &m) {
     a(2,0) = A(1,0)*A(2,1) - A(1,1)*A(2,0);
     a(2,1) = A(0,1)*A(2,0) - A(0,0)*A(2,1);
     a(2,2) = A(0,0)*A(1,1) - A(0,1)*A(1,0);
-    return mat3(a);
+    return Eigen::Matrix3d(a);
 }
 
-mat3 inv(const mat3 &m) { return mat3(m.e().inverse()); }
+Eigen::Matrix3d inv(const Eigen::Matrix3d &m) { return Eigen::Matrix3d(m.inverse()); }
 
-vect3 diag(const mat3 &m) { return vect3(m.e00, m.e11, m.e22); }
+Eigen::Vector3d diag(const Eigen::Matrix3d &m) { return Eigen::Vector3d(m(0,0), m(1,1), m(2,2)); }
 
-mat3 diag(const vect3 &v) { return mat3(v.i, 0, 0, 0, v.j, 0, 0, 0, v.k); }
+Eigen::Matrix3d diag(const Eigen::Vector3d &v) { return (Eigen::Matrix3d() << v.x(), 0, 0, 0, v.y(), 0, 0, 0, v.z()).finished(); }
 
-mat3 askew(const mat3 &m, int I) {
-    mat3 m1;
-    m1.e01 = (m.e01 - m.e10) / 2;
-    m1.e02 = (m.e02 - m.e20) / 2;
-    m1.e12 = (m.e12 - m.e21) / 2;
-    m1.e10 = -m1.e01;
-    m1.e20 = -m1.e02;
-    m1.e21 = -m1.e12;
+Eigen::Matrix3d askew(const Eigen::Matrix3d &m, int I) {
+    Eigen::Matrix3d m1;
+    m1(0,1) = (m(0,1) - m(1,0)) / 2;
+    m1(0,2) = (m(0,2) - m(2,0)) / 2;
+    m1(1,2) = (m(1,2) - m(2,1)) / 2;
+    m1(1,0) = -m1(0,1);
+    m1(2,0) = -m1(0,2);
+    m1(2,1) = -m1(1,2);
     if (I == 0) {
-        m1.e00 = m1.e11 = m1.e22 = 0.0;
+        m1(0,0) = m1(1,1) = m1(2,2) = 0.0;
     } else if (I == 1) {
-        m1.e00 = m1.e11 = m1.e22 = 1.0;
+        m1(0,0) = m1(1,1) = m1(2,2) = 1.0;
     } else {
-        m1.e00 = m.e00, m1.e11 = m.e11, m1.e22 = m.e22;
+        m1(0,0) = m(0,0), m1(1,1) = m(1,1), m1(2,2) = m(2,2);
     }
     return m1;
 }
 
-mat3 dotmul(const mat3 &m1, const mat3 &m2) { return mat3(m1.e().cwiseProduct(m2.e())); }
+Eigen::Matrix3d dotmul(const Eigen::Matrix3d &m1, const Eigen::Matrix3d &m2) { return Eigen::Matrix3d(m1.cwiseProduct(m2)); }
 
-mat3 MMT(const mat3 &m1, const mat3 &m2) {
-    const mat3 &b = (&m2 == &I33) ? m1 : m2;
-    return mat3(m1.e() * b.e().transpose());
+Eigen::Matrix3d MMT(const Eigen::Matrix3d &m1, const Eigen::Matrix3d &m2) {
+    const Eigen::Matrix3d &b = (&m2 == &I33) ? m1 : m2;
+    return Eigen::Matrix3d(m1 * b.transpose());
 }
 
-double norm(const mat3 &m) { return std::sqrt(trMMT(m)); }
 
-mat3 randn(const mat3 &mu, const double &sigma) {
+Eigen::Matrix3d randn(const Eigen::Matrix3d &mu, const double &sigma) {
     std::normal_distribution<double> dist(0.0, 1.0);
-    Eigen::Matrix3d r = mu.toEigen();
+    Eigen::Matrix3d r = mu;
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) {
             r(i, j) += sigma * dist(rngEngine());
         }
     }
-    return mat3(r);
+    return Eigen::Matrix3d(r);
 }
 
 /* ============================================================================
- * vect 线性代数
+ * 动态向量线性代数（Eigen::VectorXd）
  * ==========================================================================*/
 
-vect abs(const vect &v) {
-    vect res(v.row, v.clm);
-    res.e() = v.e().cwiseAbs();
-    return res;
-}
+Eigen::VectorXd absv(const Eigen::VectorXd &v) { return v.cwiseAbs(); }
 
-double norm(const vect &v) { return v.toEigen().norm(); }
 
-double norm1(const vect &v) { return v.toEigen().lpNorm<1>(); }
 
-double normInf(const vect &v) { return v.toEigen().lpNorm<Eigen::Infinity>(); }
 
-vect pow(const vect &v, int k) {
-    vect pp = v;
+Eigen::VectorXd pow(const Eigen::VectorXd &v, int k) {
+    Eigen::VectorXd pp = v;
     for (int i = 1; i < k; i++) {
-        pp.e() = pp.e().cwiseProduct(v.e());
+        pp = pp.cwiseProduct(v);
     }
     return pp;
 }
 
-vect sort(const vect &v) {
-    vect vtmp = v;
-    std::sort(vtmp.dd, vtmp.dd + vtmp.rc, std::greater<double>());
+/* 注意：与旧实现一致，按**降序**排序 */
+Eigen::VectorXd sort(const Eigen::VectorXd &v) {
+    Eigen::VectorXd vtmp = v;
+    std::sort(vtmp.data(), vtmp.data() + vtmp.size(), std::greater<double>());
     return vtmp;
 }
 
-double dot(const vect &v1, const vect &v2) {
-    assert(v1.row == v2.row && v1.clm == v2.clm);
-    return v1.toEigen().dot(v2.toEigen());
+double dot(const Eigen::VectorXd &v1, const Eigen::VectorXd &v2) {
+    assert(v1.size() == v2.size());
+    return v1.dot(v2);
 }
 
-vect dotmul(const vect &v1, const vect &v2) {
-    assert(v1.row == v2.row && v1.clm == v2.clm);
-    vect res(v1.row, v1.clm);
-    res.e() = v1.e().cwiseProduct(v2.e());
-    return res;
+Eigen::VectorXd dotmul(const Eigen::VectorXd &v1, const Eigen::VectorXd &v2) {
+    assert(v1.size() == v2.size());
+    return v1.cwiseProduct(v2);
 }
 
-vect randn(const vect &mu, const vect &sigma) {
-    assert(mu.rc == sigma.rc);
-    vect res(mu.row, mu.clm);
+Eigen::VectorXd randn(const Eigen::VectorXd &mu, const Eigen::VectorXd &sigma) {
+    assert(mu.size() == sigma.size());
+    Eigen::VectorXd res(mu.size());
     std::normal_distribution<double> dist(0.0, 1.0);
-    for (int i = 0; i < res.rc; i++) {
-        res.dd[i] = mu.dd[i] + sigma.dd[i] * dist(rngEngine());
+    for (int i = 0; i < res.size(); i++) {
+        res(i) = mu(i) + sigma(i) * dist(rngEngine());
     }
     return res;
 }
 
 /* ============================================================================
- * mat 线性代数
+ * 动态矩阵线性代数（Eigen::MatrixXd）
  * ==========================================================================*/
 
-void symmetry(mat &m) {
-    assert(m.row == m.clm);
-    for (int i = 0; i < m.row; i++) {
-        for (int j = i + 1; j < m.clm; j++) {
-            double f = (m.dd[i * m.clm + j] + m.dd[j * m.clm + i]) * 0.5;
-            m.dd[i * m.clm + j] = f;
-            m.dd[j * m.clm + i] = f;
-        }
-    }
+void symmetry(Eigen::MatrixXd &m) {
+    assert(m.rows() == m.cols());
+    m = 0.5 * (m + m.transpose());
 }
 
-double trace(const mat &m) {
-    assert(m.row == m.clm);
-    double s = 0.0;
-    for (int i = 0; i < m.row; i++) {
-        s += m.dd[i * m.clm + i];
-    }
-    return s;
+double trace(const Eigen::MatrixXd &m) {
+    assert(m.rows() == m.cols());
+    return m.trace();
 }
 
-double norm1(const mat &m) { return norm1(&m.dd[0], m.rc); }
 
-double normInf(const mat &m) { return normInf(&m.dd[0], m.rc); }
 
-mat dotmul(const mat &m1, const mat &m2) {
-    assert(m1.row == m2.row && m1.clm == m2.clm);
-    mat res(m1.row, m1.clm);
-    res.e() = m1.e().cwiseProduct(m2.e());
-    return res;
+Eigen::MatrixXd dotmul(const Eigen::MatrixXd &m1, const Eigen::MatrixXd &m2) {
+    assert(m1.rows() == m2.rows() && m1.cols() == m2.cols());
+    return m1.cwiseProduct(m2);
 }
 
-vect diag(const mat &m) {
-    vect vtmp(m.row, 1);
-    /* 行主序下第 i 个对角元在 dd[i*(clm+1)]。真正的对角元只有 min(row,clm) 个，
-     * 对"高瘦"矩阵（row > clm）直接按 clm+1 步长会越界读，因此超出部分补 0。 */
-    const int n = (m.row < m.clm) ? m.row : m.clm;
-    for (int i = 0; i < m.row; i++) {
-        vtmp.dd[i] = (i < n) ? m.dd[i * (m.clm + 1)] : 0.0;
-    }
-    return vtmp;
+Eigen::VectorXd diag(const Eigen::MatrixXd &m) {
+    /* 与旧实现一致：对"高瘦"矩阵（rows > cols）超出部分补 0 */
+    const int n = static_cast<int>(std::min(m.rows(), m.cols()));
+    Eigen::VectorXd v = Eigen::VectorXd::Zero(m.rows());
+    for (int i = 0; i < n; i++) v(i) = m(i, i);
+    return v;
 }
 
-mat diag(const vect &v) {
-    int rc = v.row > v.clm ? v.row : v.clm;
-    mat mtmp(rc, rc, 0.0);
-    for (int i = 0; i < rc; i++) {
-        mtmp.dd[i * rc + i] = v.dd[i];
-    }
-    return mtmp;
+Eigen::MatrixXd diag(const Eigen::VectorXd &v) {
+    return v.asDiagonal();
 }
 
-mat eye(int n) {
-    mat m(n, n, 0.0);
-    for (int i = 0; i < n; i++) {
-        m.dd[i * n + i] = 1.0;
-    }
-    return m;
+Eigen::MatrixXd eye(int n) { return Eigen::MatrixXd::Identity(n, n); }
+
+Eigen::MatrixXd inv4(const Eigen::MatrixXd &m) {
+    assert(m.rows() == 4 && m.cols() == 4);
+    return m.inverse();
 }
 
-mat inv4(const mat &m) {
-    assert(m.clm == m.row && m.clm == 4);
-    mat r(4, 4);
-    r.e() = m.e().inverse();
-    return r;
-}
 
-void RowMul(mat &m, const mat &m0, const mat &m1, int r, int fast) {
-    assert(m0.clm == m1.row);
-    int rc0 = r * m0.clm;
-    fast    = (r >= fast);
-    double *p = &m.dd[rc0];
-    for (int j = 0; j < m0.clm; j++) {
-        if (fast) {
-            p[j] = m1.dd[r * m1.clm + j];
-            continue;
-        }
-        double f = 0.0;
-        for (int k = 0; k < m0.clm; k++) {
-            f += m0.dd[rc0 + k] * m1.dd[k * m1.clm + j];
-        }
-        p[j] = f;
-    }
-}
 
-void RowMulT(mat &m, const mat &m0, const mat &m1, int r, int fast) {
-    assert(m0.clm == m1.clm);
-    int rc0  = r * m0.clm;
-    double *p = &m.dd[rc0];
-    const double *p0 = &m0.dd[rc0];
-    const double *p1jk = m1.dd;
-    for (int j = 0; j < m0.clm; j++) {
-        if (j >= fast) {
-            p[j] = p0[j];
-            p1jk += m1.clm;
-            continue;
-        }
-        double f = 0.0;
-        for (int k = 0; k < m0.clm; k++, p1jk++) {
-            f += p0[k] * (*p1jk);
-        }
-        p[j] = f;
-    }
-}
 
-void DVMDVafa(const vect &V, mat &M, double afa) {
-    assert(V.rc == M.row && M.row == M.clm);
-    for (int i = 0; i < M.clm; i++) {
-        double vi = V.dd[i], viafa = vi * afa;
-        double *prow = &M.dd[i * M.clm];
-        for (int j = 0; j < M.clm; j++) {
-            prow[j] *= vi;
-        }
-        double *pclm = &M.dd[i];
-        for (int j = 0; j < M.clm; j++, pclm += M.row) {
-            *pclm *= viafa;
-        }
-    }
-}
-
-mat randn(const mat &mu, const double &sigma) {
-    mat res(mu.row, mu.clm);
+Eigen::MatrixXd randn(const Eigen::MatrixXd &mu, const double &sigma) {
+    Eigen::MatrixXd res(mu.rows(), mu.cols());
     std::normal_distribution<double> dist(0.0, 1.0);
-    for (int i = 0; i < mu.rc; i++) {
-        res.dd[i] = mu.dd[i] + sigma * dist(rngEngine());
+    for (int i = 0; i < mu.size(); i++) {
+        res(i) = mu(i) + sigma * dist(rngEngine());
     }
     return res;
 }
@@ -1491,35 +574,38 @@ mat randn(const mat &mu, const double &sigma) {
  * 坐标系
  * ==========================================================================*/
 
-mat3 pos2Cen(const vect3 &pos) {
-    double si = std::sin(pos.i), ci = std::cos(pos.i), sj = std::sin(pos.j), cj = std::cos(pos.j);
-    return mat3(-sj, -si * cj, ci * cj, cj, -si * sj, ci * sj, 0, ci, si);
+Eigen::Matrix3d pos2Cen(const Eigen::Vector3d &pos) {
+    double si = std::sin(pos.x()), ci = std::cos(pos.x()), sj = std::sin(pos.y()), cj = std::cos(pos.y());
+    return (Eigen::Matrix3d() << -sj, -si * cj, ci * cj, cj, -si * sj, ci * sj, 0, ci, si).finished();
 }
 
-vect3 xyz2blh(const vect3 &xyz) {
+Eigen::Vector3d xyz2blh(const Eigen::Vector3d &xyz) {
     double s     = normXY(xyz);
     /*
      * Bowring/Heiskanen 参数纬度：theta = atan2(z*a, b*p)，p = sqrt(x^2+y^2) = s
      */
-    double theta = std::atan2(xyz.k * RE, s * RP);
+    double theta = std::atan2(xyz.z() * RE, s * RP);
     double s3    = std::sin(theta), c3 = std::cos(theta);
     s3 = s3 * s3 * s3;
     c3 = c3 * c3 * c3;
     if (s < 1.0) { return O31; }
-    double L  = std::atan2(xyz.j, xyz.i);
-    double B  = std::atan2(xyz.k + (ep2 * RP * s3), s - e2 * RE * c3);
+    double L  = std::atan2(xyz.y(), xyz.x());
+    double B  = std::atan2(xyz.z() + (ep2 * RP * s3), s - e2 * RE * c3);
     double sB = std::sin(B), cB = std::cos(B);
     double N  = RE / std::sqrt(1 - e2 * sB * sB);
-    return vect3(B, L, s / cB - N);
+    return Eigen::Vector3d(B, L, s / cB - N);
 }
 
-vect3 blh2xyz(const vect3 &blh) {
-    double sB = std::sin(blh.i), cB = std::cos(blh.i), sL = std::sin(blh.j), cL = std::cos(blh.j),
+Eigen::Vector3d blh2xyz(const Eigen::Vector3d &blh) {
+    double sB = std::sin(blh.x()), cB = std::cos(blh.x()), sL = std::sin(blh.y()), cL = std::cos(blh.y()),
            N = RE / std::sqrt(1 - e2 * sB * sB);
-    return vect3((N + blh.k) * cB * cL, (N + blh.k) * cB * sL, (N * (1 - e2) + blh.k) * sB);
+    return Eigen::Vector3d((N + blh.z()) * cB * cL, (N + blh.z()) * cB * sL, (N * (1 - e2) + blh.z()) * sB);
 }
 
-vect3 Vxyz2enu(const vect3 &Vxyz, const vect3 &pos) { return Vxyz * pos2Cen(pos); }
+/* 旧 vect3*mat3 是行向量右乘 VᵀM，等价写成 (Mᵀ·V) */
+Eigen::Vector3d Vxyz2enu(const Eigen::Vector3d &Vxyz, const Eigen::Vector3d &pos) {
+    return pos2Cen(pos).transpose() * Vxyz;
+}
 
 /* ============================================================================
  * 融合（Kalman 融合公式）
@@ -1532,18 +618,18 @@ void fusion(double *x1, double *p1, const double *x2, const double *p2, int n, d
         pf = p1;
     }
     double *x10 = nullptr, *xf0 = nullptr;
-    vect3 att1;
+    Eigen::Vector3d att1;
 
     /* n < 100 时前 3 个量按"姿态"处理（与 ipos3g 一致，含对 x2 的写回） */
     if (n < 100) {
         x10  = x1;
         xf0  = xf;
-        att1 = vect3(x1[0], x1[1], x1[2]);
-        vect3 phi = qq2phi(a2qua(vect3(x2[0], x2[1], x2[2])), a2qua(att1));
+        att1 = Eigen::Vector3d(x1[0], x1[1], x1[2]);
+        Eigen::Vector3d phi = qq2phi(a2qua(Eigen::Vector3d(x2[0], x2[1], x2[2])), a2qua(att1));
         double *x2w = const_cast<double *>(x2);
-        x2w[0] = phi.i;
-        x2w[1] = phi.j;
-        x2w[2] = phi.k;
+        x2w[0] = phi.x();
+        x2w[1] = phi.y();
+        x2w[2] = phi.z();
         x1[0] = x1[1] = x1[2] = 0.0;
     }
 
@@ -1555,132 +641,135 @@ void fusion(double *x1, double *p1, const double *x2, const double *p2, int n, d
     }
 
     if (n < 100 && xf0 != nullptr) {
-        vect3 v = q2att(a2qua(att1) + vect3(xf0[0], xf0[1], xf0[2]));
-        xf0[0] = v.i;
-        xf0[1] = v.j;
-        xf0[2] = v.k;
+        Eigen::Vector3d v = q2att(qPlusPhi(a2qua(att1), Eigen::Vector3d(xf0[0], xf0[1], xf0[2])));
+        xf0[0] = v.x();
+        xf0[1] = v.y();
+        xf0[2] = v.z();
         if (xf0 != x10) {
-            x10[0] = att1.i;
-            x10[1] = att1.j;
-            x10[2] = att1.k;
+            x10[0] = att1.x();
+            x10[1] = att1.y();
+            x10[2] = att1.z();
         }
     }
 }
 
-void fusion(vect3 &x1, vect3 &p1, const vect3 x2, const vect3 p2) {
-    fusion(&x1.i, &p1.i, &x2.i, &p2.i, 3);
+void fusion(Eigen::Vector3d &x1, Eigen::Vector3d &p1, const Eigen::Vector3d x2, const Eigen::Vector3d p2) {
+    fusion(&x1.x(), &p1.x(), &x2.x(), &p2.x(), 3);
 }
 
-void fusion(vect3 &x1, vect3 &p1, const vect3 x2, const vect3 p2, vect3 &xf, vect3 &pf) {
-    fusion(&x1.i, &p1.i, &x2.i, &p2.i, 3, &xf.i, &pf.i);
+void fusion(Eigen::Vector3d &x1, Eigen::Vector3d &p1, const Eigen::Vector3d x2, const Eigen::Vector3d p2, Eigen::Vector3d &xf, Eigen::Vector3d &pf) {
+    fusion(&x1.x(), &p1.x(), &x2.x(), &p2.x(), 3, &xf.x(), &pf.x());
 }
 
 /* ============================================================================
  * 扩展：对称正定线性代数（Eigen）
  * ==========================================================================*/
 
-mat llt_L(const mat &A) {
-    if (A.row != A.clm || A.row == 0) {
-        return mat(0, 0);
+Eigen::MatrixXd llt_L(const Eigen::MatrixXd &A) {
+    if (A.rows() != A.cols() || A.rows() == 0) {
+        return Eigen::MatrixXd();
     }
     /* 注意必须 .eval()：Eigen 对 `a = a + a.transpose()` 这种自别名写法
      * 不会自动插入临时变量，逐个元素赋值会读到已被覆盖的转置项。 */
-    Eigen::MatrixXd a = (0.5 * (A.toEigen() + A.toEigen().transpose())).eval();
+    Eigen::MatrixXd a = (0.5 * (A + A.transpose())).eval();
 
-    /* 快路径：Cholesky */
+    /* 只在真正正定时返回下三角 Cholesky 因子 L（A = L·Lᵀ）。
+     *
+     * 【不要把这里退化成「LDLT + 把负的 D 钳到小正数」】
+     * 那样拼出来的 Pᵀ·L·√D 虽然近似满足 L·Lᵀ = A，但**一般不是下三角**，
+     * 而 llt_sqrtinv / llt_inv / schur_complement 都用
+     * `triangularView<Eigen::Lower>().solve(...)` 消费本函数的返回值 ——
+     * 对非三角矩阵做三角求解会静默给出错误结果（triangularView 的下三角
+     * 部分可能奇异，还会产生 NaN）。
+     *
+     * 实测：600 个秩亏/含极小负特征值的对称矩阵里有 300 个走钳位分支并返回
+     * 非下三角矩阵；受控实验 200 例中 schur_complement 的 r_out 全部为 NaN。
+     *
+     * 因此非正定时一律返回空矩阵，让调用方走各自的特征分解 / 伪逆兜底路径
+     * （llt_sqrtinv 与 schur_complement 都已有正确的兜底分支）。 */
     Eigen::LLT<Eigen::MatrixXd> llt(a);
-    if (llt.info() == Eigen::Success) {
-        return mat(Eigen::MatrixXd(llt.matrixL()));
+    if (llt.info() != Eigen::Success) {
+        return Eigen::MatrixXd();
     }
+    const Eigen::MatrixXd Lm = llt.matrixL();
 
-    /* 慢路径：预积分的 Qk 用的是梯形离散
-     *     Qk = 0.5*dt*(phi·A + A·phiᵀ)
-     * 它在 (p,v) 分块上会带来一个极小的负特征值（量级 ~1e-5·trace），
-     * 于是 covariance_ 在积分步数很少时会轻微不正定，LLT 直接失败。
-     * 这里改用 LDLT，并把 D 里低于"相对阈值"的元素钳到阈值上：
-     *     A = Pᵀ L D Lᵀ P   ->   L~ = Pᵀ · L · sqrt(max(D, thr))
-     * 得到 L~ L~ᵀ ≈ A（负方向被投影成一个小正数）。
-     * 阈值取相对量 1e-12·max|D|，因此协方差整体放大/缩小时都有效；
-     * 旧实现用固定 1e-300 阻尼，对这种量级的负特征值完全无效。 */
-    Eigen::LDLT<Eigen::MatrixXd> ldlt(a);
-    if (ldlt.info() != Eigen::Success) {
-        return mat(0, 0);
+    /* 数值奇异保护：
+     * 对"舍入后恰好正定"的矩阵（例如由 Q·diag(0,λ2,λ3)·Qᵀ 构造出来的、
+     * 数学上秩亏但浮点下最小特征值变成 ~1e-16·dmax 的协方差），LLT 也会
+     * 报告成功，而它的最小主元只有 ~1e-8·最大主元。此时
+     *   - llt_sqrtinv 会返回 L⁻¹，在该方向上的增益达 1e8；
+     *   - 白化后残差被放大 1e16 量级，等于把一个不可观方向当成强约束。
+     * 所以这里用 Cholesky 主元的相对大小做条件数保护
+     * （cond(A) ≈ (dmax/dmin)²，阈值 1e-5 对应 cond ≲ 1e10），
+     * 不满足就返回空，让调用方走"相对阈值截断的伪逆"路径。
+     * 良态协方差（cond ~1e3）的 dmin/dmax ≈ 0.03，仍走快路径。 */
+    const double dmn = Lm.diagonal().cwiseAbs().minCoeff();
+    const double dmx = Lm.diagonal().cwiseAbs().maxCoeff();
+    if (!(dmx > 0.0) || !(dmn > 1.0e-5 * dmx)) {
+        return Eigen::MatrixXd();
     }
-    const Eigen::VectorXd d = ldlt.vectorD();
-    const double dmax       = d.cwiseAbs().maxCoeff();
-    if (!(dmax > 0.0) || !std::isfinite(dmax)) {
-        return mat(0, 0);
-    }
-    const double thr = 1.0e-12 * dmax;
-    Eigen::VectorXd s(d.size());
-    for (int i = 0; i < d.size(); i++) {
-        s(i) = std::sqrt(d(i) > thr ? d(i) : thr);
-    }
-    const Eigen::PermutationMatrix<Eigen::Dynamic, Eigen::Dynamic, int> perm(ldlt.transpositionsP());
-    const Eigen::MatrixXd Ld = Eigen::MatrixXd(ldlt.matrixL());
-    Eigen::MatrixXd L = (perm.transpose() * Ld * s.asDiagonal()).eval();
-    return mat(L);
+    return Lm;
 }
 
 
-mat llt_sqrtinv(const mat &A) {
-    mat L = llt_L(A);
-    if (L.row > 0) {
-        Eigen::MatrixXd Le   = L.toEigen();
+Eigen::MatrixXd llt_sqrtinv(const Eigen::MatrixXd &A) {
+    Eigen::MatrixXd L = llt_L(A);
+    if (L.rows() > 0) {
+        Eigen::MatrixXd Le   = L;
         Eigen::MatrixXd Linv = Le.triangularView<Eigen::Lower>().solve(
             Eigen::MatrixXd::Identity(Le.rows(), Le.cols()));
         /* S = L^{-1}（下三角），S^T S = L^{-T} L^{-1} = A^{-1} */
         if (Linv.allFinite()) {
-            return mat(Eigen::MatrixXd(Linv));   // 原为 Linv.transpose()
+            return Linv;   // 原为 Linv.transpose()
         }
     }
 
     /* 兜底：A 严重退化时（例如刚 reset、协方差里还有数值负特征值），
      * 用特征分解求带相对截断的伪逆平方根：S = V·diag(1/sqrt(d))·Vᵀ。
      * 与 pinv_sym / schur_complement 的处理方式保持一致。 */
-    if (A.row != A.clm || A.row == 0) {
-        return mat(0, 0);
+    if (A.rows() != A.cols() || A.rows() == 0) {
+        return Eigen::MatrixXd();
     }
-    Eigen::MatrixXd a = (0.5 * (A.toEigen() + A.toEigen().transpose())).eval();
+    Eigen::MatrixXd a = (0.5 * (A + A.transpose())).eval();
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(a);
     if (es.info() != Eigen::Success) {
-        return mat(0, 0);
+        return Eigen::MatrixXd();
     }
     const Eigen::VectorXd d = es.eigenvalues();
     const Eigen::MatrixXd V = es.eigenvectors();
     const double dmax       = d.cwiseAbs().maxCoeff();
     if (!(dmax > 0.0) || !std::isfinite(dmax)) {
-        return mat(0, 0);
+        return Eigen::MatrixXd();
     }
     const double thr = 1.0e-10 * dmax;
     Eigen::VectorXd dsinv(d.size());
     for (int i = 0; i < d.size(); i++) {
         dsinv(i) = (d(i) > thr) ? 1.0 / std::sqrt(d(i)) : 0.0;
     }
-    return mat(Eigen::MatrixXd(V * dsinv.asDiagonal() * V.transpose()));
+    return V * dsinv.asDiagonal() * V.transpose();
 }
 
-mat llt_inv(const mat &A) {
-    mat L = llt_L(A);
-    if (L.row == 0) {
-        return mat(0, 0);
+Eigen::MatrixXd llt_inv(const Eigen::MatrixXd &A) {
+    Eigen::MatrixXd L = llt_L(A);
+    if (L.rows() == 0) {
+        return Eigen::MatrixXd();
     }
-    Eigen::MatrixXd Le = L.toEigen();
+    Eigen::MatrixXd Le = L;
     Eigen::MatrixXd Linv = Le.triangularView<Eigen::Lower>().solve(
         Eigen::MatrixXd::Identity(Le.rows(), Le.cols()));
-    return mat(Eigen::MatrixXd(Linv.transpose() * Linv));
+    return Linv.transpose() * Linv;
 }
 
-mat pinv_sym(const mat &A, double eps) {
-    if (A.row != A.clm || A.row == 0) {
-        return mat(0, 0);
+Eigen::MatrixXd pinv_sym(const Eigen::MatrixXd &A, double eps) {
+    if (A.rows() != A.cols() || A.rows() == 0) {
+        return Eigen::MatrixXd();
     }
-    Eigen::MatrixXd a = A.toEigen();
+    Eigen::MatrixXd a = A;
     a                 = (0.5 * (a + a.transpose())).eval(); /*< 必须 eval，见 llt_L 的注释 */
 
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(a);
     if (es.info() != Eigen::Success) {
-        return mat(0, 0);
+        return Eigen::MatrixXd();
     }
     Eigen::VectorXd d = es.eigenvalues();
     Eigen::MatrixXd V = es.eigenvectors();
@@ -1692,155 +781,113 @@ mat pinv_sym(const mat &A, double eps) {
     for (int i = 0; i < d.size(); i++) {
         dinv(i) = (std::fabs(d(i)) > thr) ? 1.0 / d(i) : 0.0;
     }
-    return mat(Eigen::MatrixXd(V * dinv.asDiagonal() * V.transpose()));
+    return V * dinv.asDiagonal() * V.transpose();
 }
 
 
-void LocalFrame::init(const vect3 &blh0) {
+void LocalFrame::init(const Eigen::Vector3d &blh0) {
     blh0_ = blh0;
     eth_.Update(blh0_, O31);
     gravity_ = eth_.gn;
     init_    = true;
 
-    const double sl = std::sin(blh0.i), cl = std::cos(blh0.j != 0.0 ? blh0.j : 0.0);
+    const double sl = std::sin(blh0.x()), cl = std::cos(blh0.y() != 0.0 ? blh0.y() : 0.0);
     /* 实际应写成： */
-    const double lat = blh0.i, lon = blh0.j;
+    const double lat = blh0.x(), lon = blh0.y();
     const double sl_ = std::sin(lat), cl_ = std::cos(lat);
     const double so_ = std::sin(lon), co_ = std::cos(lon);
-    R_en_m3_.set(-so_, -sl_*co_,  cl_*co_,
-                co_, -sl_*so_,  cl_*so_,
-                0.0,       cl_,       sl_);
+    R_en_m3_ << -so_, -sl_ * co_,  cl_ * co_,
+                 co_, -sl_ * so_,  cl_ * so_,
+                 0.0,        cl_,        sl_;
     p0_ecef_v3_ = blh2xyz(blh0);
 
 }
 
-vect3 LocalFrame::blh2neu(const vect3 &blh) const {
-    double pn = (blh.i - blh0_.i) * eth_.RMh;
-    double pe = (blh.j - blh0_.j) * eth_.clRNh;
-    double pu = blh.k - blh0_.k;
-    return vect3(pe, pn, pu);
+Eigen::Vector3d LocalFrame::blh2neu(const Eigen::Vector3d &blh) const {
+    double pn = (blh.x() - blh0_.x()) * eth_.RMh;
+    double pe = (blh.y() - blh0_.y()) * eth_.clRNh;
+    double pu = blh.z() - blh0_.z();
+    return Eigen::Vector3d(pe, pn, pu);
 }
 
-vect3 LocalFrame::neu2blh(const vect3 &neu) const {
-    double lat = blh0_.i + neu.j * eth_.f_RMh;
-    double lon = blh0_.j + neu.i * eth_.f_clRNh;
-    double hgt = blh0_.k + neu.k;
-    return vect3(lat, lon, hgt);
+Eigen::Vector3d LocalFrame::neu2blh(const Eigen::Vector3d &neu) const {
+    double lat = blh0_.x() + neu.y() * eth_.f_RMh;
+    double lon = blh0_.y() + neu.x() * eth_.f_clRNh;
+    double hgt = blh0_.z() + neu.z();
+    return Eigen::Vector3d(lat, lon, hgt);
 }
 
-vect3 quatVec(const quat &q) { return vect3(q.q1, q.q2, q.q3); }
+Eigen::Vector3d quatVec(const Eigen::Quaterniond &q) { return Eigen::Vector3d(q.x(), q.y(), q.z()); }
 
 /* pose = {pE, pN, pU, qx, qy, qz, qw}
  * mix  = {v, bg, ba} 或 {v, bg, ba, sodo} ----------------------------------------*/
 void stateToData(const State &state, double *pose, double *mix, bool with_odometer) {
-    pose[0] = state.p.i;
-    pose[1] = state.p.j;
-    pose[2] = state.p.k;
-    pose[3] = state.q.q1; /*< x */
-    pose[4] = state.q.q2; /*< y */
-    pose[5] = state.q.q3; /*< z */
-    pose[6] = state.q.q0; /*< w */
+    pose[0] = state.p.x();
+    pose[1] = state.p.y();
+    pose[2] = state.p.z();
+    pose[3] = state.q.x(); /*< x */
+    pose[4] = state.q.y(); /*< y */
+    pose[5] = state.q.z(); /*< z */
+    pose[6] = state.q.w(); /*< w */
 
-    mix[0] = state.v.i;
-    mix[1] = state.v.j;
-    mix[2] = state.v.k;
-    mix[3] = state.bg.i;
-    mix[4] = state.bg.j;
-    mix[5] = state.bg.k;
-    mix[6] = state.ba.i;
-    mix[7] = state.ba.j;
-    mix[8] = state.ba.k;
-    if (with_odometer) {
-        mix[9] = state.sodo;
-    }
+    mix[0] = state.v.x();
+    mix[1] = state.v.y();
+    mix[2] = state.v.z();
+    mix[3] = state.bg.x();
+    mix[4] = state.bg.y();
+    mix[5] = state.bg.z();
+    mix[6] = state.ba.x();
+    mix[7] = state.ba.y();
+    mix[8] = state.ba.z();
+    (void)with_odometer;   /* mix 现为 9 维；sodo 由 calib[0] 承载 */
 }
 
 void stateFromData(const double *pose, const double *mix, bool with_odometer, State &state) {
-    state.p = vect3(pose[0], pose[1], pose[2]);
-    state.q = quat(pose[6], pose[3], pose[4], pose[5]);
-    normlize(&state.q);
+    state.p = Eigen::Vector3d(pose[0], pose[1], pose[2]);
+    state.q = Eigen::Quaterniond(pose[6], pose[3], pose[4], pose[5]);
+    normlize(state.q);
 
-    state.v  = vect3(mix[0], mix[1], mix[2]);
-    state.bg = vect3(mix[3], mix[4], mix[5]);
-    state.ba = vect3(mix[6], mix[7], mix[8]);
-    state.sodo = with_odometer ? mix[9] : 0.0;
+    state.v  = Eigen::Vector3d(mix[0], mix[1], mix[2]);
+    state.bg = Eigen::Vector3d(mix[3], mix[4], mix[5]);
+    state.ba = Eigen::Vector3d(mix[6], mix[7], mix[8]);
+    state.sodo = 0.0;   /* mix 里不再有 sodo 通道 */
 }
 
 void posePlus(const double *pose, const double *delta, double *pose_plus) {
-    quat q(pose[6], pose[3], pose[4], pose[5]);
-    normlize(&q);
+    Eigen::Quaterniond q(pose[6], pose[3], pose[4], pose[5]);
+    normlize(q);
 
-    quat q_plus = q * rv2q(vect3(delta[3], delta[4], delta[5]));
-    normlize(&q_plus);
+    Eigen::Quaterniond q_plus = q * rv2q(Eigen::Vector3d(delta[3], delta[4], delta[5]));
+    normlize(q_plus);
 
     pose_plus[0] = pose[0] + delta[0];
     pose_plus[1] = pose[1] + delta[1];
     pose_plus[2] = pose[2] + delta[2];
-    pose_plus[3] = q_plus.q1;
-    pose_plus[4] = q_plus.q2;
-    pose_plus[5] = q_plus.q3;
-    pose_plus[6] = q_plus.q0;
+    pose_plus[3] = q_plus.x();
+    pose_plus[4] = q_plus.y();
+    pose_plus[5] = q_plus.z();
+    pose_plus[6] = q_plus.w();
 }
 
 void poseMinus(const double *y, const double *x, double *y_minus_x) {
-    quat qy(y[6], y[3], y[4], y[5]);
-    quat qx(x[6], x[3], x[4], x[5]);
-    normlize(&qy);
-    normlize(&qx);
+    Eigen::Quaterniond qy(y[6], y[3], y[4], y[5]);
+    Eigen::Quaterniond qx(x[6], x[3], x[4], x[5]);
+    normlize(qy);
+    normlize(qx);
 
     //vect3 dphi = q2rv(qy * (~qx)); /*< qx -> qy 的旋转矢量 */
-    vect3 dphi = q2rv((~qx) * qy);   /*< log(qx⁻¹ ⊗ qy)，与 posePlus 对偶 */
+    Eigen::Vector3d dphi = q2rv(((qx.conjugate())) * qy);   /*< log(qx⁻¹ ⊗ qy)，与 posePlus 对偶 */
 
     y_minus_x[0] = y[0] - x[0];
     y_minus_x[1] = y[1] - x[1];
     y_minus_x[2] = y[2] - x[2];
-    y_minus_x[3] = dphi.i;
-    y_minus_x[4] = dphi.j;
-    y_minus_x[5] = dphi.k;
+    y_minus_x[3] = dphi.x();
+    y_minus_x[4] = dphi.y();
+    y_minus_x[5] = dphi.z();
 }
 
 
-mat quatLeftMatrix(const quat &q) {
-    mat m(4, 4, 0.0);
-    m.dd[0]  = q.q0;
-    m.dd[1]  = -q.q1;
-    m.dd[2]  = -q.q2;
-    m.dd[3]  = -q.q3;
-    m.dd[4]  = q.q1;
-    m.dd[5]  = q.q0;
-    m.dd[6]  = -q.q3;
-    m.dd[7]  = q.q2;
-    m.dd[8]  = q.q2;
-    m.dd[9]  = q.q3;
-    m.dd[10] = q.q0;
-    m.dd[11] = -q.q1;
-    m.dd[12] = q.q3;
-    m.dd[13] = -q.q2;
-    m.dd[14] = q.q1;
-    m.dd[15] = q.q0;
-    return m;
-}
 
-mat quatRightMatrix(const quat &q) {
-    mat m(4, 4, 0.0);
-    m.dd[0]  = q.q0;
-    m.dd[1]  = -q.q1;
-    m.dd[2]  = -q.q2;
-    m.dd[3]  = -q.q3;
-    m.dd[4]  = q.q1;
-    m.dd[5]  = q.q0;
-    m.dd[6]  = q.q3;
-    m.dd[7]  = -q.q2;
-    m.dd[8]  = q.q2;
-    m.dd[9]  = -q.q3;
-    m.dd[10] = q.q0;
-    m.dd[11] = q.q1;
-    m.dd[12] = q.q3;
-    m.dd[13] = q.q2;
-    m.dd[14] = -q.q1;
-    m.dd[15] = q.q0;
-    return m;
-}
 
 
 /* 圆锥/划桨补偿系数表---------------------------------------*/
@@ -1864,19 +911,24 @@ void IMU::Reset(void) {
     swmm = svmm = wm_1 = vm_1 = O31;
 }
 
-void IMU::SetKga(const mat3 &Kg0, const vect3 eb0, const mat3 &Ka0, const vect3 &db0) {
+void IMU::SetKga(const Eigen::Matrix3d &Kg0, const Eigen::Vector3d eb0, const Eigen::Matrix3d &Ka0, const Eigen::Vector3d &db0) {
     Kg = Kg0;
     eb = eb0;
     Ka = Ka0;
     db = db0;
 }
 
-double IMU::Update(const vect3 *pwm, const vect3 *pvm, int nSamples0, double ts) {
-    assert(nSamples0 > 0 && nSamples0 < 6);
+double IMU::Update(const Eigen::Vector3d *pwm, const Eigen::Vector3d *pvm, int nSamples0, double ts) {
+    /* 不要用 assert 做这个边界检查：实际构建是 -O3 -DNDEBUG，assert 会被去掉，
+     * 而 nSamples0==6 会让下面的循环读到 conefactors[4][4]（第 5 行只有 4 个
+     * 元素）→ 越界读；nSamples0<=0 会用到未初始化的 pwm[0] 并让 nts=0。
+     * 这里钳到受支持区间 [1, 5]（圆锥补偿最多 5 子样）。 */
+    if (nSamples0 < 1) nSamples0 = 1;
+    if (nSamples0 > 5) nSamples0 = 5;
 
     int i;
     const double *pcf = (nSamples0 >= 2) ? conefactors[nSamples0 - 2] : nullptr;
-    vect3 cm(0.0), sm(0.0);
+    Eigen::Vector3d cm = Eigen::Vector3d::Zero(), sm = Eigen::Vector3d::Zero();
     wmm = O31;
     vmm = O31;
 
@@ -1908,8 +960,8 @@ double IMU::Update(const vect3 *pwm, const vect3 *pvm, int nSamples0, double ts)
     vmm += pvm[i];
     svmm += vmm;
 
-    phim = wmm + cm * pwm[i];
-    dvbm = vmm + wmm * (vmm * 0.5) + (cm * pvm[i] + sm * pwm[i]);
+    phim = wmm + cm.cross(pwm[i]);
+    dvbm = vmm + wmm.cross(vmm * 0.5) + (cm.cross(pvm[i]) + sm.cross(pwm[i]));
 
     return tk;
 }
@@ -1935,38 +987,38 @@ void earth::Init(double a0, double f0) {
     Update(O31, O31);
 }
 
-void earth::Update(const vect3 &pos0, const vect3 &vn0) {
+void earth::Update(const Eigen::Vector3d &pos0, const Eigen::Vector3d &vn0) {
     pos = pos0;
     vn  = vn0;
 
-    sl = std::sin(pos.i);
-    cl = std::cos(pos.i);
+    sl = std::sin(pos.x());
+    cl = std::cos(pos.x());
     tl = sl / cl;
 
     double sq  = 1.0 - e2 * sl * sl;
     double sq2 = std::sqrt(sq);
 
-    RMh    = a * (1.0 - e2) / sq / sq2 + pos.k;
+    RMh    = a * (1.0 - e2) / sq / sq2 + pos.z();
     f_RMh  = 1.0 / RMh;
-    RNh    = a / sq2 + pos.k;
+    RNh    = a / sq2 + pos.z();
     clRNh  = cl * RNh;
     f_RNh  = 1.0 / RNh;
     f_clRNh = 1.0 / clRNh;
 
-    wnie = vect3(0.0, wie * cl, wie * sl);
-    wnen = vect3(-vn.j * f_RMh, vn.i * f_RNh, vn.i * f_RNh * tl);
+    wnie = Eigen::Vector3d(0.0, wie * cl, wie * sl);
+    wnen = Eigen::Vector3d(-vn.y() * f_RMh, vn.x() * f_RNh, vn.x() * f_RNh * tl);
     wnin = wnie + wnen;
 
     sl2 = sl * sl;
     sl4 = sl2 * sl2;
-    gn  = vect3(0.0, 0.0, -(G0 * (1.0 + 5.27094e-3 * sl2 + 2.32718e-5 * sl4) - 3.086e-6 * pos.k));
+    gn  = Eigen::Vector3d(0.0, 0.0, -(G0 * (1.0 + 5.27094e-3 * sl2 + 2.32718e-5 * sl4) - 3.086e-6 * pos.z()));
 
     gcc = pgn ? *pgn : gn;
-    gcc -= (wnie + wnin) * vn; /*< 叉乘：-(wie+wen) x vn */
+    gcc -= (wnie + wnin).cross(vn); /*< 叉乘：-(wie+wen) x vn */
 }
 
-vect3 earth::vn2dpos(const vect3 &vn0, float ts) const {
-    return vect3(vn0.j * f_RMh, vn0.i * f_clRNh, vn0.k) * static_cast<double>(ts);
+Eigen::Vector3d earth::vn2dpos(const Eigen::Vector3d &vn0, float ts) const {
+    return Eigen::Vector3d(vn0.y() * f_RMh, vn0.x() * f_clRNh, vn0.z()) * static_cast<double>(ts);
 }
 
 /* ============================================================================
@@ -2000,9 +1052,9 @@ void Preintegration::reset(void) {
     sodo_  = 0.0;
 }
 
-void Preintegration::setBias(const vect3 &bg, const vect3 &ba) {
-    const double dbg = (bg - bg_).toEigen().norm();
-    const double dba = (ba - ba_).toEigen().norm();
+void Preintegration::setBias(const Eigen::Vector3d &bg, const Eigen::Vector3d &ba) {
+    const double dbg = (bg - bg_).norm();
+    const double dba = (ba - ba_).norm();
     bg_ = bg;
     ba_ = ba;
     if (dbg > 1.0e-10 || dba > 1.0e-10) {
@@ -2019,8 +1071,8 @@ void Preintegration::integration(const ImuMeas &meas) {
 }
 
 void Preintegration::repropagation(void) {
-    const vect3 bg_save = bg_;
-    const vect3 ba_save = ba_;
+    const Eigen::Vector3d bg_save = bg_;
+    const Eigen::Vector3d ba_save = ba_;
     const std::deque<ImuMeas> meas_save = meas_list_;
 
     /* 清空累加状态（保留 bias 与测量队列） */
@@ -2071,37 +1123,37 @@ void Preintegration::propagate(const ImuMeas &meas) {
     }
 
     /* 去偏 */
-    const vect3 dtheta = meas.dtheta - bg_ * dt;
-    const vect3 dvel   = meas.dvel   - ba_ * dt;
+    const Eigen::Vector3d dtheta = meas.dtheta - bg_ * dt;
+    const Eigen::Vector3d dvel   = meas.dvel   - ba_ * dt;
 
-    const Eigen::Vector3d dtheta_e = dtheta.toEigen();
-    const Eigen::Vector3d dvel_e   = dvel.toEigen();
+    const Eigen::Vector3d dtheta_e = dtheta;
+    const Eigen::Vector3d dvel_e   = dvel;
 
     /* 单步旋转 & 半拍旋转 */
-    quat dq_step = rv2q(dtheta);
-    dq_step.normlize(&dq_step);
+    Eigen::Quaterniond dq_step = rv2q(dtheta);
+    normlize(dq_step);
 
-    quat dq_half = rv2q(dtheta * 0.5);
-    dq_half.normlize(&dq_half);
+    Eigen::Quaterniond dq_half = rv2q(dtheta * 0.5);
+    normlize(dq_half);
 
-    const quat q_prev = q_;
-    quat q_mid = q_prev * dq_half;
-    q_mid.normlize(&q_mid);
+    const Eigen::Quaterniond q_prev = q_;
+    Eigen::Quaterniond q_mid = q_prev * dq_half;
+    normlize(q_mid);
 
-    Eigen::Matrix3d R_prev = q_prev.toEigen().toRotationMatrix();
-    Eigen::Matrix3d R_mid  = q_mid .toEigen().toRotationMatrix();
+    Eigen::Matrix3d R_prev = q_prev.toRotationMatrix();
+    Eigen::Matrix3d R_mid  = q_mid .toRotationMatrix();
 
     const Eigen::Vector3d a_body = dvel_e / dt;
 
     /* 位置/速度更新 */
-    const vect3 v_old = v_;
+    const Eigen::Vector3d v_old = v_;
     const Eigen::Vector3d a_b0 = R_mid * a_body;
 
-    p_ = p_ + v_old * dt + vect3(a_b0 * (0.5 * dt * dt));
-    v_ = v_old + vect3(a_b0 * dt);
+    p_ = p_ + v_old * dt + Eigen::Vector3d(a_b0 * (0.5 * dt * dt));
+    v_ = v_old + Eigen::Vector3d(a_b0 * dt);
 
     q_ = q_prev * dq_step;
-    q_.normlize(&q_);
+    normlize(q_);
 
     /* 协方差传播 */
     const Eigen::Vector3d w_body = dtheta_e / dt;
@@ -2114,8 +1166,8 @@ void Preintegration::propagate(const ImuMeas &meas) {
 
     if (meas.odovel != 0.0) {
         /* 安装角 C_b^m * e_x。abv = [pitch, 0, yaw] */
-        const double ap = param_.abv.i;   /* pitch */
-        const double ay = param_.abv.j;   /* yaw   */
+        const double ap = param_.abv.x();   /* pitch */
+        const double ay = param_.abv.y();   /* yaw   */
         const Eigen::Vector3d cx(
              std::cos(ay) * std::cos(ap),
             -std::sin(ay) * std::cos(ap),
@@ -2126,10 +1178,10 @@ void Preintegration::propagate(const ImuMeas &meas) {
 
         /* 杆臂补偿：omega_ib^b × l_OD；dtheta_e 是已经去偏后的角增量 */
         const Eigen::Vector3d w_body_b = dtheta_e / dt;
-        const Eigen::Vector3d v_lev =  w_body_b.cross(param_.lvOD.toEigen());
+        const Eigen::Vector3d v_lev =  w_body_b.cross(param_.lvOD);
 
         const Eigen::Vector3d ds_body = ds_scaled * cx + v_lev * dt;
-        s_ = s_ + vect3(R_mid * ds_body);
+        s_ = s_ + Eigen::Vector3d(R_mid * ds_body);
     }
 
     /* 缓存 */
@@ -2215,11 +1267,13 @@ NoiseMatrix Preintegration::buildQ(double dt) const {
 State plus(const State &s, const DeltaN &delta) {
     State r = s;
 
-    const vect3 dp  (delta(0),  delta(1),  delta(2) );
-    const vect3 dphi(delta(3),  delta(4),  delta(5) );
-    const vect3 dv  (delta(6),  delta(7),  delta(8) );
-    const vect3 dbg (delta(9),  delta(10), delta(11));
-    const vect3 dba (delta(12), delta(13), delta(14));
+    /* 块序与 README X.19 / buildF / buildG / buildQ / PreintResidual 一致：
+     *   [δp(0..2), δv(3..5), δφ(6..8), δbg(9..11), δba(12..14)] */
+    const Eigen::Vector3d dp  (delta(0),  delta(1),  delta(2) );
+    const Eigen::Vector3d dv  (delta(3),  delta(4),  delta(5) );
+    const Eigen::Vector3d dphi(delta(6),  delta(7),  delta(8) );
+    const Eigen::Vector3d dbg (delta(9),  delta(10), delta(11));
+    const Eigen::Vector3d dba (delta(12), delta(13), delta(14));
 
     /* 平移 / 速度 / 零偏：直接相加 */
     r.p  = s.p  + dp;
@@ -2229,7 +1283,7 @@ State plus(const State &s, const DeltaN &delta) {
 
     /* 旋转：右扰动，扰动向量在体轴系 */
     r.q  = s.q * rv2q(dphi);
-    r.q.normlize(&r.q);    /* 防止长期迭代中数值漂移 */
+    normlize(r.q);    /* 防止长期迭代中数值漂移 */
 
     return r;
 }
@@ -2239,16 +1293,16 @@ DeltaN minus(const State &a, const State &b) {
     d.setZero();
 
     /* 平移 / 速度 / 零偏：直接相减 */
-    d.segment<3>(0)  = (a.p  - b.p ).toEigen();
-    d.segment<3>(6)  = (a.v  - b.v ).toEigen();
-    d.segment<3>(9)  = (a.bg - b.bg).toEigen();
-    d.segment<3>(12) = (a.ba - b.ba).toEigen();
+    d.segment<3>(0)  = (a.p  - b.p );
+    d.segment<3>(3)  = (a.v  - b.v );   /* 与 plus / buildF 同为 [δp,δv,δφ,…] */
+    d.segment<3>(9)  = (a.bg - b.bg);
+    d.segment<3>(12) = (a.ba - b.ba);
 
     /* 旋转：δφ = Log( q_b⁻¹ ⊗ q_a )
      * 与 plus 使用的右扰动严格对偶：
      *   设 a.q = b.q ⊗ Exp(δφ)  ⟹  δφ = Log( b.q⁻¹ ⊗ a.q )
      */
-    d.segment<3>(3)  = q2rv((~b.q) * a.q).toEigen();
+    d.segment<3>(6)  = q2rv(b.q.conjugate() * a.q);
 
     return d;
 }
@@ -2263,18 +1317,20 @@ void applyDelta(State &s, const DeltaN &delta) {
 State plus(const State &s, const DeltaNOdo &delta) {
     State r = s;
 
-    const vect3 dp  (delta(0),  delta(1),  delta(2) );
-    const vect3 dphi(delta(3),  delta(4),  delta(5) );
-    const vect3 dv  (delta(6),  delta(7),  delta(8) );
-    const vect3 dbg (delta(9),  delta(10), delta(11));
-    const vect3 dba (delta(12), delta(13), delta(14));
+    /* 块序与 README X.19 / buildF / buildG / buildQ / PreintResidual 一致：
+     *   [δp(0..2), δv(3..5), δφ(6..8), δbg(9..11), δba(12..14)] */
+    const Eigen::Vector3d dp  (delta(0),  delta(1),  delta(2) );
+    const Eigen::Vector3d dv  (delta(3),  delta(4),  delta(5) );
+    const Eigen::Vector3d dphi(delta(6),  delta(7),  delta(8) );
+    const Eigen::Vector3d dbg (delta(9),  delta(10), delta(11));
+    const Eigen::Vector3d dba (delta(12), delta(13), delta(14));
 
     r.p  = s.p  + dp;
     r.v  = s.v  + dv;
     r.bg = s.bg + dbg;
     r.ba = s.ba + dba;
     r.q  = s.q * rv2q(dphi);
-    r.q.normlize(&r.q);
+    normlize(r.q);
 
     r.sodo = s.sodo + delta(15);   /* 比例因子误差：直接加性 */
 
@@ -2298,41 +1354,39 @@ void applyDelta(State &s, const DeltaNOdo &delta) {
  * ============================================================ */
 void toData(const State &s, double *pose, double *mix, bool with_odometer) {
     /* pose = {pE, pN, pU, qx, qy, qz, qw} */
-    pose[0] = s.p.i;
-    pose[1] = s.p.j;
-    pose[2] = s.p.k;
-    pose[3] = s.q.q1;   /* x */
-    pose[4] = s.q.q2;   /* y */
-    pose[5] = s.q.q3;   /* z */
-    pose[6] = s.q.q0;   /* w */
+    pose[0] = s.p.x();
+    pose[1] = s.p.y();
+    pose[2] = s.p.z();
+    pose[3] = s.q.x();   /* x */
+    pose[4] = s.q.y();   /* y */
+    pose[5] = s.q.z();   /* z */
+    pose[6] = s.q.w();   /* w */
 
     /* mix = {v, bg, ba [, sodo]} */
-    mix[0] = s.v.i;
-    mix[1] = s.v.j;
-    mix[2] = s.v.k;
-    mix[3] = s.bg.i;
-    mix[4] = s.bg.j;
-    mix[5] = s.bg.k;
-    mix[6] = s.ba.i;
-    mix[7] = s.ba.j;
-    mix[8] = s.ba.k;
-    if (with_odometer) {
-        mix[9] = s.sodo;
-    }
+    mix[0] = s.v.x();
+    mix[1] = s.v.y();
+    mix[2] = s.v.z();
+    mix[3] = s.bg.x();
+    mix[4] = s.bg.y();
+    mix[5] = s.bg.z();
+    mix[6] = s.ba.x();
+    mix[7] = s.ba.y();
+    mix[8] = s.ba.z();
+    (void)with_odometer;   /* mix 现为 9 维；sodo 由 calib[0] 承载 */
 }
 
 State fromData(const double *pose, const double *mix, bool with_odometer) {
     State s;
 
-    s.p = vect3(pose[0], pose[1], pose[2]);
+    s.p = Eigen::Vector3d(pose[0], pose[1], pose[2]);
 
     /* 注意构造顺序：(w, x, y, z) */
-    s.q = quat(pose[6], pose[3], pose[4], pose[5]);
-    normlize(&s.q);
+    s.q = Eigen::Quaterniond(pose[6], pose[3], pose[4], pose[5]);
+    normlize(s.q);
 
-    s.v    = vect3(mix[0], mix[1], mix[2]);
-    s.bg   = vect3(mix[3], mix[4], mix[5]);
-    s.ba   = vect3(mix[6], mix[7], mix[8]);
+    s.v    = Eigen::Vector3d(mix[0], mix[1], mix[2]);
+    s.bg   = Eigen::Vector3d(mix[3], mix[4], mix[5]);
+    s.ba   = Eigen::Vector3d(mix[6], mix[7], mix[8]);
     s.sodo = with_odometer ? mix[9] : 0.0;
 
     return s;
@@ -2342,40 +1396,38 @@ State fromData(const double *pose, const double *mix, bool with_odometer) {
 /* ============================================================================
  * 法方程累积
  * ==========================================================================*/
-void accumulate_normal_equations(const mat &J, const vect &r, mat &H, vect &b) {
-    assert(J.row == r.rc);
-
-    if (H.row == 0) {
-        H = mat(J.clm, J.clm, 0.0);
+void accumulate_normal_equations(const Eigen::MatrixXd &J, const Eigen::VectorXd &r,
+                                 Eigen::MatrixXd &H, Eigen::VectorXd &b) {
+    /* 形状检查必须显式做：实际构建是 -O3 -DNDEBUG，assert 会失效，
+     * 而形状不符会让下面的 noalias() 越界读写。 */
+    if (J.rows() != r.size()) {
+        return;
     }
-    if (b.rc == 0) {
-        b = vect(J.clm, 0.0);
+    if (H.size() == 0) {
+        H = Eigen::MatrixXd::Zero(J.cols(), J.cols());
     }
-    assert(H.row == J.clm && H.clm == J.clm);
-    assert(b.rc == J.clm);
-
-    Eigen::MatrixXd Je = J.toEigen();
-    Eigen::VectorXd re = r.toEigen();
-    Eigen::MatrixXd He = H.toEigen();
-    Eigen::VectorXd be = b.toEigen();
+    if (b.size() == 0) {
+        b = Eigen::VectorXd::Zero(J.cols());
+    }
+    if (H.rows() != J.cols() || H.cols() != J.cols() || b.size() != J.cols()) {
+        return;   /* 列布局漂移：宁可拒绝，也不要静默算错 */
+    }
 
     /* H += Jᵀ J, b += Jᵀ r
      * 用 selfadjointView<Lower>().rankUpdate 更高效，但为了通用
-     * （J 可能行数 > 列数，也可能列数 > 行数），直接用矩阵乘法 */
-    He.noalias() += Je.transpose() * Je;
-    be.noalias() += Je.transpose() * re;
-
-    H = mat(He);
-    b = vect(be);
+     * （J 可能行数 > 列数，也可能列数 > 行数），直接用矩阵乘法。
+     * 这里不再需要容器与 Eigen 之间的往返深拷贝。 */
+    H.noalias() += J.transpose() * J;
+    b.noalias() += J.transpose() * r;
 }
 
 /* ============================================================================
  * Schur 补
  * ==========================================================================*/
-bool schur_complement(const mat &H, const vect &b, int num_marginalized,
-                      mat &J_out, vect &r_out) {
-    const int n = H.row;
-    if (H.row != H.clm || b.rc != n || n == 0) {
+bool schur_complement(const Eigen::MatrixXd &H, const Eigen::VectorXd &b, int num_marginalized,
+                      Eigen::MatrixXd &J_out, Eigen::VectorXd &r_out) {
+    const int n = static_cast<int>(H.rows());
+    if (H.rows() != H.cols() || b.size() != n || n == 0) {
         return false;
     }
     if (num_marginalized <= 0 || num_marginalized >= n) {
@@ -2385,9 +1437,8 @@ bool schur_complement(const mat &H, const vect &b, int num_marginalized,
     const int r = n - m;
 
     /* ---- 分块 ---- */
-    Eigen::MatrixXd He = H.toEigen();
-    He = 0.5 * (He + He.transpose()).eval();   /* 强制对称，避免数值误差 */
-    Eigen::VectorXd be = b.toEigen();
+    Eigen::MatrixXd He = 0.5 * (H + H.transpose());   /* 强制对称，避免数值误差 */
+    const Eigen::VectorXd &be = b;
 
     const Eigen::MatrixXd H_mm = He.topLeftCorner(m, m);
     const Eigen::MatrixXd H_mr = He.topRightCorner(m, r);
@@ -2438,12 +1489,12 @@ bool schur_complement(const mat &H, const vect &b, int num_marginalized,
     /* ---- 分解 H* = J_outᵀ J_out ---- */
     Eigen::MatrixXd J_out_e, r_out_e;
 
-    const mat L = llt_L(mat(H_star));
-    if (L.row > 0) {
+    const Eigen::MatrixXd L = llt_L(H_star);
+    if (L.rows() > 0) {
         /* H_star = L·Lᵀ，取 J_out = Lᵀ（上三角）
          * J_outᵀ r_out = b*  ⟹  L·r_out = b*  ⟹  r_out = L⁻¹·b* */
-        J_out_e = L.toEigen().transpose();
-        const Eigen::MatrixXd Le = L.toEigen();
+        J_out_e = L.transpose();
+        const Eigen::MatrixXd Le = L;
         r_out_e = Le.triangularView<Eigen::Lower>().solve(b_star);
     } else {
         /* 兜底：H_star = V·D·Vᵀ，负特征值钳到 0
@@ -2475,8 +1526,17 @@ bool schur_complement(const mat &H, const vect &b, int num_marginalized,
         r_out_e = dinv_sq.asDiagonal() * (V.transpose() * b_star);
     }
 
-    J_out = mat(J_out_e);
-    r_out = vect(r_out_e);
+    /* 返回前必须检查有限性：本函数的输出会被直接当作边缘化先验的
+     * (J, r) 使用，一旦含 NaN/Inf 会静默污染整个优化问题。
+     * （历史上 llt_L 的钳位分支在这里产出过 NaN。） */
+    if (!J_out_e.allFinite() || !r_out_e.allFinite()) {
+        J_out.resize(0, 0);
+        r_out.resize(0);
+        return false;
+    }
+
+    J_out = J_out_e;
+    r_out = r_out_e;
     return true;
 }
 
@@ -2485,41 +1545,41 @@ bool schur_complement(const mat &H, const vect &b, int num_marginalized,
  * ==========================================================================*/
 void MarginalizationInfo::reset() {
     n_ = 0;
-    H_ = mat();
-    b_ = vect();
-    J_prior_ = mat();
-    r_prior_ = vect();
+    H_.resize(0, 0);
+    b_.resize(0);
+    J_prior_.resize(0, 0);
+    r_prior_.resize(0);
 }
 
-void MarginalizationInfo::addResidual(const mat &J, const vect &r) {
+void MarginalizationInfo::addResidual(const Eigen::MatrixXd &J, const Eigen::VectorXd &r) {
     accumulate_normal_equations(J, r, H_, b_);
-    n_ = H_.row;
+    n_ = static_cast<int>(H_.rows());
 }
 
-void MarginalizationInfo::setPrior(const mat &J_out, const vect &r_out) {
+void MarginalizationInfo::setPrior(const Eigen::MatrixXd &J_out, const Eigen::VectorXd &r_out) {
     J_prior_ = J_out;
     r_prior_ = r_out;
     /* 先验法方程 H += J_outᵀ J_out, b += J_outᵀ r_out */
     accumulate_normal_equations(J_out, r_out, H_, b_);
-    n_ = H_.row;
+    n_ = static_cast<int>(H_.rows());
 }
 
 bool MarginalizationInfo::marginalize(int num_marginalized) {
     if (n_ == 0) {
         return false;
     }
-    mat J_new;
-    vect r_new;
+    Eigen::MatrixXd J_new;
+    Eigen::VectorXd r_new;
     if (!schur_complement(H_, b_, num_marginalized, J_new, r_new)) {
         return false;
     }
     /* 边缘化完成后，把结果保存为先验，并让累积状态回到"只有先验"的状态 */
     J_prior_ = J_new;
     r_prior_ = r_new;
-    H_ = mat();
-    b_ = vect();
+    H_.resize(0, 0);
+    b_.resize(0);
     accumulate_normal_equations(J_prior_, r_prior_, H_, b_);
-    n_ = H_.row;
+    n_ = static_cast<int>(H_.rows());
     return true;
 }
 
@@ -2684,7 +1744,7 @@ preprocessImages(const std::string& cam_dir,
             if (tf.track_cnt < 2) continue;   /* 只保留稳定追踪点 */
             VisualObs vo;
             vo.feat_id = tf.feat_id;
-            vo.xyz_c   = vect3(tf.xyz_c(0), tf.xyz_c(1), 1.0);
+            vo.xyz_c   = Eigen::Vector3d(tf.xyz_c(0), tf.xyz_c(1), 1.0);
             vo.sigma   = visual_sigma;
             obs.push_back(vo);
         }
@@ -2700,9 +1760,17 @@ preprocessImages(const std::string& cam_dir,
  * ==========================================================================*/
 void GraphOptimizer::buildProblem(ceres::Problem &problem,
                                   std::vector<Frame> &frames,
-                                  const vect3 &g_n) {
+                                  const Eigen::Vector3d &g_n,
+                                  std::vector<double*> *ordered) {
+    /* 记录参数块的加入顺序。EvaluateOptions.parameter_blocks 用这个顺序
+     * 决定 CRS 雅可比的列序 —— 边缘化就是靠它把"要消去的列"放到最前面。 */
+    auto addBlock = [&](double *p, int size) {
+        problem.AddParameterBlock(p, size);
+        if (ordered) ordered->push_back(p);
+    };
+
     /* ---- 0) 标定参数块（全局，窗口内共享） ---- */
-    problem.AddParameterBlock(calib_data_.data(), NUM_CALIB);
+    addBlock(calib_data_.data(), NUM_CALIB);
     problem.SetManifold(calib_data_.data(), new CalibManifold());
     if (!opt_.calib_mode) {
         problem.SetParameterBlockConstant(calib_data_.data());   /* 导航模式：固定 */
@@ -2710,9 +1778,9 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
 
     /* ---- 1) 帧参数块 + Manifold ---- */
     for (auto &f : frames) {
-        problem.AddParameterBlock(f.pose.data(), NUM_POSE);
+        addBlock(f.pose.data(), NUM_POSE);
         problem.SetManifold(f.pose.data(), new PoseManifold());
-        problem.AddParameterBlock(f.mix.data(), NUM_MIX_ODO);
+        addBlock(f.mix.data(), NUM_MIX_ODO);
     }
     if (opt_.fix_first_pose && !frames.empty()) {
         problem.SetParameterBlockConstant(frames.front().pose.data());
@@ -2722,7 +1790,7 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
     for (size_t k = 0; k + 1 < frames.size(); ++k) {
         if (!frames[k].pre_to_next) continue;
         auto *cost = new ceres::AutoDiffCostFunction<PreintResidual,
-                                                     15, 7, 10, 7, 10>(
+                                                     15, 7, NUM_MIX_ODO, 7, NUM_MIX_ODO>(
             new PreintResidual(*frames[k].pre_to_next, g_n,
                                opt_.whiten_preint, opt_.bias_jac));
         problem.AddResidualBlock(cost, nullptr,
@@ -2741,7 +1809,7 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
     /* ---- 4) GNSS 速度因子 ---- */
     for (auto &f : frames) {
         if (!f.has_gnss_vel) continue;
-        auto *cost = new ceres::AutoDiffCostFunction<GnssVelResidual, 3, 10>(
+        auto *cost = new ceres::AutoDiffCostFunction<GnssVelResidual, 3, NUM_MIX_ODO>(
             new GnssVelResidual(f.gnss_vn, f.gnss_vn_std, 1.5));
         problem.AddResidualBlock(cost, nullptr, f.mix.data());
     }
@@ -2758,7 +1826,7 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
     /* ---- 6) 静止零速因子 ---- */
     for (auto &f : frames) {
         if (!f.is_static) continue;
-        auto *cost = new ceres::AutoDiffCostFunction<StaticVelResidual, 3, 10>(
+        auto *cost = new ceres::AutoDiffCostFunction<StaticVelResidual, 3, NUM_MIX_ODO>(
             new StaticVelResidual(opt_.static_vel_sigma, 1.0));
         problem.AddResidualBlock(cost, nullptr, f.mix.data());
     }
@@ -2766,7 +1834,7 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
     /* ---- 7) 里程计速度因子（引用整个标定块） ---- */
     for (auto &f : frames) {
         if (!f.has_odo) continue;
-        auto *cost = new ceres::AutoDiffCostFunction<OdoVelResidual, 3, 7, 10, NUM_CALIB>(
+        auto *cost = new ceres::AutoDiffCostFunction<OdoVelResidual, 3, 7, NUM_MIX_ODO, NUM_CALIB>(
             new OdoVelResidual(f.odo_dS, f.odo_dt, f.odo_omega_meas,
                                f.odo_std, 1.5));
         problem.AddResidualBlock(cost, nullptr,
@@ -2789,7 +1857,7 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
             if (it == inv_depths_.end()) { inv_depths_[fid] = 0.1; it = inv_depths_.find(fid); }
             double* inv_depth = &(it->second);
 
-            problem.AddParameterBlock(inv_depth, 1);
+            addBlock(inv_depth, 1);
             problem.SetParameterLowerBound(inv_depth, 0, opt_.inv_depth_min);
             problem.SetParameterUpperBound(inv_depth, 0, opt_.inv_depth_max);
 
@@ -2819,14 +1887,47 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
     if (opt_.use_gnss_dd) {
         const int nf = std::min(std::max(opt_.max_freq, 1), MAX_FREQ);
 
+        /* base_pos_ecef 必须显式设置：默认是全 0（地心）。忘了设的话
+         * ‖b_i‖ 会变成整段站星距，双差完全不成立 —— 直接拒绝并说明原因。 */
+        if (base_pos_v3_.norm() < 1.0) {
+            if (!amb_warned_basepos_) {
+                std::fprintf(stderr,
+                    "[GNSS-DD] 基准站坐标无效（||base_pos_ecef||=%.3f，看起来仍是默认地心）。"
+                    "双差需要 ECEF 下的基准站位置，请用 setBasePosEcef()/--base-pos 设置；"
+                    "本次跳过全部 GNSS 双差因子。\n", base_pos_v3_.norm());
+                amb_warned_basepos_ = true;
+            }
+            return;
+        }
+
+        int n_dd_frames = 0;
+        for (const auto &fr : frames) if (fr.has_gnss_raw) ++n_dd_frames;
+        if (n_dd_frames == 0) {
+            if (!amb_warned_nodata_) {
+                std::fprintf(stderr,
+                    "[GNSS-DD] 已请求双差紧组合，但没有任何帧带 dd_obs（has_gnss_raw 全为 false）。"
+                    "该模式目前没有数据生产者，紧组合因子不会生效，请不要当作已启用。\n");
+                amb_warned_nodata_ = true;
+            }
+            return;
+        }
+
+        amb_used_keys_.clear();
+
         for (size_t k = 0; k < frames.size(); ++k) {
             auto& f = frames[k];
             if (!f.has_gnss_raw) continue;
 
-            problem.AddParameterBlock(f.clk_bias.data(),  1);
-            problem.AddParameterBlock(f.clk_drift.data(), 1);
+            addBlock(f.clk_bias.data(),  1);
+            addBlock(f.clk_drift.data(), 1);
 
-            /* 模糊度容器 */
+            /* 模糊度容器
+             *
+             * 【重要】buildProblem 只允许**只读** amb_values / amb_fixed：
+             * 整周固定信息由外部（整周搜索成功后）写回，这里清空会让
+             * `opt_.fix_ambiguity && f.amb_fixed[j][fi]` 恒为 false，使
+             * --rtk-fix 变成空开关；即使侥幸可达，amb_values 也会是 0，
+             * 把模糊度硬钉到 0。因此这里只保证容器尺寸，不清零已有取值。 */
             f.amb_values.resize(f.dd_obs.size());
             f.amb_fixed .resize(f.dd_obs.size());
             f.amb_wl_values.resize(f.dd_obs.size(), 0.0);
@@ -2836,8 +1937,7 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
 
             for (size_t j = 0; j < f.dd_obs.size(); ++j) {
                 const auto& dd = f.dd_obs[j];
-                f.amb_values[j].fill(0.0);
-                f.amb_fixed [j].fill(false);
+                /* 不再 fill(0.0)/fill(false)：见上面的说明。 */
 
                 /* ---- 逐频：伪距 + 载波 ---- */
                 for (int fi = 0; fi < nf; ++fi) {
@@ -2851,14 +1951,19 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
                     }
 
                     if (dd.has_L[fi]) {
-                        const int key = ambKey(dd.ref_sat, dd.sat, fi);
+                        /* 弧段号：帧内该 DD 在该频点上的弧号。超出 dd_arc 范围时退化为 0
+                        * （例如手工构造的测试帧没填 dd_arc）。 */
+                        const int arc = (j < f.dd_arc.size() && fi < MAX_FREQ)
+                                        ? f.dd_arc[j][fi] : 0;
+                        const AmbKey key = ambKey(dd.ref_sat, dd.sat, fi, arc);
                         auto it = ambiguities_.find(key);
                         if (it == ambiguities_.end()) {
                             ambiguities_[key] = {0.0};
                             it = ambiguities_.find(key);
                         }
+                        amb_used_keys_.insert(key);
                         double* amb = it->second.data();
-                        problem.AddParameterBlock(amb, 1);
+                        addBlock(amb, 1);
                         problem.SetParameterLowerBound(amb, 0, -1.0e4);
                         problem.SetParameterUpperBound(amb, 0,  1.0e4);
 
@@ -2880,14 +1985,16 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
                 if (opt_.use_wl_nl && nf >= 2 &&
                     dd.has_L[0] && dd.has_L[1]) {
 
-                    const int key_wl = ambKey(dd.ref_sat, dd.sat, 100);
+                    const int arc_cmb = (j < f.dd_arc.size())? std::max(f.dd_arc[j][0], f.dd_arc[j][1]) : 0;
+                    const AmbKey key_wl = ambKey(dd.ref_sat, dd.sat, 100, arc_cmb);
                     auto it_wl = ambiguities_.find(key_wl);
                     if (it_wl == ambiguities_.end()) {
                         ambiguities_[key_wl] = {0.0};
                         it_wl = ambiguities_.find(key_wl);
                     }
+                    amb_used_keys_.insert(key_wl);
                     double* amb_wl = it_wl->second.data();
-                    problem.AddParameterBlock(amb_wl, 1);
+                    addBlock(amb_wl, 1);
 
                     auto* wl = new GnssDDWideLaneResidual(
                         dd, base_pos_v3_, R_en_m3_, p0_ecef_v3_,
@@ -2901,14 +2008,15 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
                         problem.AddResidualBlock(fix, nullptr, amb_wl);
                     }
 
-                    const int key_nl = ambKey(dd.ref_sat, dd.sat, 200);
+                    const AmbKey key_nl = ambKey(dd.ref_sat, dd.sat, 200, arc_cmb);
                     auto it_nl = ambiguities_.find(key_nl);
                     if (it_nl == ambiguities_.end()) {
                         ambiguities_[key_nl] = {0.0};
                         it_nl = ambiguities_.find(key_nl);
                     }
+                    amb_used_keys_.insert(key_nl);
                     double* amb_nl = it_nl->second.data();
-                    problem.AddParameterBlock(amb_nl, 1);
+                    addBlock(amb_nl, 1);
 
                     auto* nl = new GnssDDNarrowLaneResidual(
                         dd, base_pos_v3_, R_en_m3_, p0_ecef_v3_,
@@ -2921,14 +2029,16 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
                 if (opt_.use_if_combination && nf >= 2 &&
                     dd.has_L[0] && dd.has_L[1]) {
 
-                    const int key_if = ambKey(dd.ref_sat, dd.sat, 300);
+                    const int arc_cmb = (j < f.dd_arc.size()) ? std::max(f.dd_arc[j][0], f.dd_arc[j][1]) : 0;
+                    const AmbKey key_if = ambKey(dd.ref_sat, dd.sat, 300, arc_cmb);
                     auto it_if = ambiguities_.find(key_if);
                     if (it_if == ambiguities_.end()) {
                         ambiguities_[key_if] = {0.0};
                         it_if = ambiguities_.find(key_if);
                     }
+                    amb_used_keys_.insert(key_if);
                     double* amb_if = it_if->second.data();
-                    problem.AddParameterBlock(amb_if, 1);
+                    addBlock(amb_if, 1);
 
                     auto* iff = new GnssDDIFCarrierResidual(
                         dd, base_pos_v3_, R_en_m3_, p0_ecef_v3_,
@@ -2955,8 +2065,62 @@ void GraphOptimizer::buildProblem(ceres::Problem &problem,
                 }
             }
         }
+    
+        /* 清理本窗口未再出现的旧键：键集只增不减会污染协方差提取 */
+        ambPruneUnused(ambiguities_, amb_used_keys_);
     }
     
+}
+
+/* ============================================================================
+ * 模糊度管理
+ * ==========================================================================*/
+int ambPromoteReference(AmbMap &m, int old_ref, int new_ref, int slot, int arc) {
+    if (old_ref == new_ref) return 0;
+    /* N_k^{k'}：旧参考 k 与新参考 k' 之间的模糊度 */
+    auto it_kk = m.find(ambKey(old_ref, new_ref, slot, arc));
+    const bool has_ref_diff = (it_kk != m.end());
+    const double n_kk = has_ref_diff ? it_kk->second[0] : 0.0;
+
+    int n_ok = 0;
+    std::vector<std::pair<AmbKey, double>> add;
+    for (auto &kv : m) {
+        if (ambKeyRefSat(kv.first) != old_ref) continue;
+        if (ambKeySlot(kv.first) != slot) continue;
+        if (ambKeyArc(kv.first) != arc) continue;
+        const int sat = ambKeySat(kv.first);
+        if (sat == new_ref) continue;                 /* 新参考星自身没有 DD 模糊度 */
+        if (!has_ref_diff) continue;                  /* 无法转换：留给新弧重新收敛 */
+        add.emplace_back(ambKey(new_ref, sat, slot, arc), kv.second[0] - n_kk);
+    }
+    for (auto &p : add) m[p.first] = {p.second};
+    n_ok = static_cast<int>(add.size());
+    return n_ok;
+}
+
+AmbKey ambAdvanceArc(AmbMap &m, int ref_sat, int sat, int slot, int new_arc,
+                     double slip_cycles) {
+    const AmbKey new_key = ambKey(ref_sat, sat, slot, new_arc);
+    if (m.find(new_key) == m.end()) {
+        /* 以旧值（若在）为初值，按周跳量修正 */
+        double v = 0.0;
+        for (auto &kv : m) {
+            if (ambKeyRefSat(kv.first) == ref_sat && ambKeySat(kv.first) == sat &&
+                ambKeySlot(kv.first) == slot) {
+                v = kv.second[0];
+                break;
+            }
+        }
+        m[new_key] = {v + slip_cycles};
+    }
+    return new_key;
+}
+
+void ambPruneUnused(AmbMap &m, const std::set<AmbKey> &used) {
+    for (auto it = m.begin(); it != m.end();) {
+        if (used.find(it->first) == used.end()) it = m.erase(it);
+        else ++it;
+    }
 }
 
 bool GraphOptimizer::extractAmbiguityCovariance(ceres::Problem& problem,
@@ -2983,97 +2147,223 @@ bool GraphOptimizer::extractAmbiguityCovariance(ceres::Problem& problem,
 }
 
 /* ============================================================================
- * GraphOptimizer::marginalizeOldestFrame
+ * GraphOptimizer：先验指针解析
  *
- *   说明：真正的边缘化需要"逐残差"地提取 J 与 r。Ceres 没有直接暴露
- *   "给定 ResidualBlockId 求雅可比"的接口，因此实现上分两步：
- *     (a) 先把 frame[0] 相关的残差块临时从 problem 里移除；
- *     (b) 用 ceres::Problem::Evaluate 在"当前参数点"处求所有残差的
- *         J 与 r，累积成法方程，再做 Schur 补。
- *
- *   本示例只做 (b) 的简化：调用方保证所有 frame[0] 相关残差都在
- *   problem 里；若需精确的分块提取，建议在因子层追加
- *   "GetLinearizationData" 接口，由因子自己返回 J/r。
+ * 先验里存的是"块身份"而不是裸指针 —— std::vector<Frame> 会 reallocate，
+ * 滑窗每步还会 erase，指针会失效。这里按身份重新解析成当前参数块的指针。
  * ==========================================================================*/
-bool GraphOptimizer::marginalizeOldestFrame(ceres::Problem &problem,
-                                            std::vector<Frame> &frames,
-                                            const mat  &J_prior_old,
-                                            const vect &r_prior_old) {
-    if (frames.size() < 2) return false;
-
-    /* ---- 1) 用 Problem::Evaluate 求全局 J 与 r ---- */
-    ceres::Problem::EvaluateOptions eval_opt;
-    eval_opt.apply_loss_function = false;
-
-    double cost = 0.0;
-    std::vector<double> residuals;
-    std::vector<double>  gradient;          // ← 第 4 个参数（梯度过期不用）
-    ceres::CRSMatrix jacobian;
-
-    if (!problem.Evaluate(eval_opt, &cost, &residuals, &gradient, &jacobian)) {
-        return false;
-    }
-
-    /* 把 CRSMatrix 展成稠密矩阵 */
-    const int n_rows = jacobian.num_rows;
-    const int n_cols = jacobian.num_cols;
-    Eigen::MatrixXd J_full = Eigen::MatrixXd::Zero(n_rows, n_cols);
-    for (int i = 0; i < n_rows; ++i) {
-        for (int k = jacobian.rows[i]; k < jacobian.rows[i + 1]; ++k) {
-            J_full(i, jacobian.cols[k]) = jacobian.values[k];
+bool GraphOptimizer::resolvePriorPointers(const std::vector<Frame> &frames,
+                                          std::vector<double*> &out) {
+    out.clear();
+    if (!prior_) return false;
+    out.reserve(prior_->refs.size());
+    for (const PriorBlockRef &ref : prior_->refs) {
+        switch (ref.kind) {
+        case PriorRefKind::CALIB:
+            out.push_back(calib_data_.data());
+            break;
+        case PriorRefKind::FRAME_POSE: {
+            double *p = nullptr;
+            for (const Frame &f : frames) {
+                if (f.time == ref.time) { p = const_cast<double*>(f.pose.data()); break; }
+            }
+            if (!p) return false;
+            out.push_back(p);
+            break;
+        }
+        case PriorRefKind::FRAME_MIX: {
+            double *p = nullptr;
+            for (const Frame &f : frames) {
+                if (f.time == ref.time) { p = const_cast<double*>(f.mix.data()); break; }
+            }
+            if (!p) return false;
+            out.push_back(p);
+            break;
+        }
+        case PriorRefKind::AMB: {
+            auto it = ambiguities_.find(ref.amb);
+            if (it == ambiguities_.end()) return false;
+            out.push_back(it->second.data());
+            break;
+        }
         }
     }
-    Eigen::VectorXd r_full(residuals.size());
-    for (size_t i = 0; i < residuals.size(); ++i) r_full(i) = residuals[i];
+    return out.size() == prior_->refs.size();
+}
 
-    /* ---- 2) 组装法方程 ---- */
-    mat  H_acc;
-    vect b_acc;
-    if (J_prior_old.row > 0) {
-        /* 先验也是残差之一：H = J_pᵀ J_p, b = J_pᵀ r_p */
-        accumulate_normal_equations(J_prior_old, r_prior_old, H_acc, b_acc);
+/* ============================================================================
+ * GraphOptimizer::marginalizeOldestFrame
+ *
+ * 做法（与 VINS 系列一致的"部分边缘化"）：
+ *   1. 只取**触及 frames[0]** 的残差块（外加已有的旧先验）；
+ *      只涉及保留帧的因子不能进 Schur 补 —— 它们出窗后仍在问题里，
+ *      进补就会把信息重复计一次（过度自信）。
+ *   2. 用 EvaluateOptions.parameter_blocks 显式定列序，把 frames[0] 的
+ *      参数块放在最前面，于是"被消去的切空间列"恰好是连续的前缀。
+ *   3. 用 Ceres 报出的切空间维数（ParameterBlockTangentSize）算 num_marg，
+ *      不再硬编码 16 —— calib 是否自由、fix_first_pose 是否打开都会影响它。
+ *   4. Schur 补后把结果存成按块描述的先验 prior_。
+ * ==========================================================================*/
+bool GraphOptimizer::marginalizeOldestFrame(std::vector<Frame> &frames,
+                                            const Eigen::Vector3d &g_n) {
+    if (frames.size() < 2) return false;
+
+    ceres::Problem problem;
+    std::vector<double*> blocks;
+    buildProblem(problem, frames, g_n, &blocks);
+    if (blocks.empty()) return false;
+
+    /* 旧先验纳入本次边缘化，信息才能沿窗口链式传递 */
+    ceres::ResidualBlockId prior_id = nullptr;
+    if (prior_ && prior_->J.rows() > 0) {
+        std::vector<double*> ptrs;
+        if (!resolvePriorPointers(frames, ptrs)) return false;
+        prior_id = problem.AddResidualBlock(
+            new MarginalizationPriorFactor(prior_->J, prior_->r, prior_->meta), nullptr, ptrs);
     }
 
-    /* 全问题 J/r 累积 */
-    accumulate_normal_equations(mat(J_full), vect(r_full), H_acc, b_acc);
+    /* ---- 1) 要消去的块：frames[0] 的 pose / mix（非常量者） ---- */
+    std::vector<double*> head;
+    if (!problem.IsParameterBlockConstant(frames[0].pose.data())) head.push_back(frames[0].pose.data());
+    if (!problem.IsParameterBlockConstant(frames[0].mix.data()))  head.push_back(frames[0].mix.data());
+    if (head.empty()) return false;
 
-    /* ---- 3) Schur 补：消去 frame[0] 的全部切空间变量 ---- */
-    /* 注意：切空间布局取决于 Ceres 内部的参数块顺序与切空间维度。
-     * 第一帧贡献 6 (pose) + 10 (mix) = 16 维。
-     * 但如果 fix_first_pose 为真，第一帧 pose 是常量，不参与切空间，
-     * 那么只需要消去 mix 的 10 维；这里假设 fix_first_pose=false，
-     * 通用地消去 16 维。实际工程中请按 Ceres 的 variable ordering
-     * 精确映射。 */
-    const int dim_marg = 16;
-    mat  J_new;
-    vect r_new;
-    if (!schur_complement(H_acc, b_acc, dim_marg, J_new, r_new)) {
-        return false;
+    /* ---- 2) 显式列序：head 在最前，其余按 buildProblem 的固定顺序 ---- */
+    ceres::Problem::EvaluateOptions eo;
+    eo.apply_loss_function = false;
+    eo.parameter_blocks = head;
+    for (double *p : blocks) {
+        if (std::find(head.begin(), head.end(), p) != head.end()) continue;
+        if (problem.IsParameterBlockConstant(p)) continue;   /* 常量块不产生列 */
+        eo.parameter_blocks.push_back(p);
     }
 
-    J_prior_ = J_new;
-    r_prior_ = r_new;
+    /* ---- 3) 只取触及 frames[0] 的残差块 ---- */
+    std::vector<ceres::ResidualBlockId> res_ids;
+    for (double *p : head) {
+        std::vector<ceres::ResidualBlockId> rb;
+        problem.GetResidualBlocksForParameterBlock(p, &rb);
+        for (auto id : rb) {
+            if (std::find(res_ids.begin(), res_ids.end(), id) == res_ids.end()) res_ids.push_back(id);
+        }
+    }
+    if (prior_id) res_ids.push_back(prior_id);
+    if (res_ids.empty()) return false;
+    eo.residual_blocks = res_ids;
+
+    /* ---- 4) 求 J / r ---- */
+    double cost = 0.0;
+    std::vector<double> residuals, gradient;
+    ceres::CRSMatrix jac;
+    if (!problem.Evaluate(eo, &cost, &residuals, &gradient, &jac)) return false;
+
+    const int nr = jac.num_rows;
+    const int nc = jac.num_cols;
+    if (nr <= 0 || nc <= 0) return false;
+    Eigen::MatrixXd J = Eigen::MatrixXd::Zero(nr, nc);
+    for (int row = 0; row < nr; ++row) {
+        for (int k = jac.rows[row]; k < jac.rows[row + 1]; ++k) {
+            J(row, jac.cols[k]) = jac.values[k];
+        }
+    }
+    Eigen::VectorXd r(residuals.size());
+    for (size_t k = 0; k < residuals.size(); ++k) r(k) = residuals[k];
+
+    /* ---- 5) 法方程 + Schur 补 ---- */
+    Eigen::MatrixXd H;
+    Eigen::VectorXd b;
+    accumulate_normal_equations(J, r, H, b);
+    if (H.rows() != nc) return false;
+
+    int num_marg = 0;
+    for (double *p : head) num_marg += problem.ParameterBlockTangentSize(p);
+    if (num_marg <= 0 || num_marg >= nc) return false;
+
+    Eigen::MatrixXd J_out;
+    Eigen::VectorXd r_out;
+    if (!schur_complement(H, b, num_marg, J_out, r_out)) return false;
+
+    /* ---- 6) 组装按块描述的新先验 ---- */
+    auto spec = std::make_shared<PriorSpec>();
+    spec->J = J_out;
+    spec->r = r_out;
+
+    /* 指针 -> 块身份 的反查表 */
+    std::map<const double*, PriorBlockRef> ref_of;
+    ref_of[calib_data_.data()] = PriorBlockRef{PriorRefKind::CALIB, 0.0, 0};
+    for (auto &fr : frames) {
+        ref_of[fr.pose.data()] = PriorBlockRef{PriorRefKind::FRAME_POSE, fr.time, 0};
+        ref_of[fr.mix.data()]  = PriorBlockRef{PriorRefKind::FRAME_MIX,  fr.time, 0};
+    }
+    for (auto &kv : ambiguities_) {
+        ref_of[kv.second.data()] = PriorBlockRef{PriorRefKind::AMB, 0.0, kv.first};
+    }
+
+    for (size_t k = head.size(); k < eo.parameter_blocks.size(); ++k) {
+        double *p = eo.parameter_blocks[k];
+        if (problem.IsParameterBlockConstant(p)) continue;
+        const int amb = problem.ParameterBlockSize(p);
+        const int tan = problem.ParameterBlockTangentSize(p);
+        if (tan <= 0) continue;
+
+        MargPriorBlock mb;
+        mb.ambient = amb;
+        mb.tangent = tan;
+        mb.lin.assign(p, p + amb);      /* 线性化点必须留副本 */
+
+        PriorBlockRef ref{PriorRefKind::CALIB, 0.0, 0};
+        auto it = ref_of.find(p);
+        if (it != ref_of.end()) ref = it->second;
+        switch (ref.kind) {
+        case PriorRefKind::CALIB:      mb.kind = MargBlockKind::CALIB;    break;
+        case PriorRefKind::FRAME_POSE: mb.kind = MargBlockKind::POSE;     break;
+        default:                       mb.kind = MargBlockKind::ADDITIVE; break;
+        }
+        spec->refs.push_back(ref);
+        spec->meta.push_back(std::move(mb));
+    }
+    if (spec->refs.size() != spec->meta.size() || spec->meta.empty()) return false;
+
+    int tot = 0;
+    for (const MargPriorBlock &m : spec->meta) tot += m.tangent;
+    if (tot != J_out.cols()) return false;   /* 列映射必须严丝合缝 */
+
+    prior_    = spec;
+    J_prior_  = J_out;
+    r_prior_  = r_out;
     return true;
 }
 
 /* ============================================================================
  * GraphOptimizer::optimize
  * ==========================================================================*/
-bool GraphOptimizer::optimize(std::vector<Frame> &frames, const vect3 &g_n) {
+bool GraphOptimizer::optimize(std::vector<Frame> &frames, const Eigen::Vector3d &g_n) {
     if (frames.empty()) return false;
 
     /* ---- 1) 组装问题 ---- */
     ceres::Problem problem;
     buildProblem(problem, frames, g_n);
 
-    /* 若已有先验，作为参数块加入（这里用简化版：把先验视作一个
-     * 覆盖"所有保留变量"的大残差块。实际项目应按变量分块追加）。 */
-    if (J_prior_.row > 0) {
-        /* 注意：下面的调用需要把 J_prior_ 的列映射到 frame 参数块的指针，
-         * 这里只演示接口，实际使用时请按变量顺序展开。 */
-        // problem.AddResidualBlock(
-        //     new MarginalizationPriorFactor(J_prior_, r_prior_), nullptr,
-        //     /* 依次列出所有被覆盖的参数块 */ ...);
+    /* 把边缘化先验真正加进问题。
+     * 先验按块描述：pose 用 PoseManifold，calib 用 CalibManifold，
+     * mix/模糊度等为加性块；块指针按身份（帧时间/模糊度键）重新解析。 */
+    if (prior_ && prior_->J.rows() > 0) {
+        std::vector<double*> prior_ptrs;
+        if (resolvePriorPointers(frames, prior_ptrs)) {
+            problem.AddResidualBlock(
+                new MarginalizationPriorFactor(prior_->J, prior_->r, prior_->meta),
+                nullptr, prior_ptrs);
+            ++stat_prior_blocks_added;
+        } else {
+            /* 块对不上（例如窗口变化导致某帧已不在）→ 宁可丢弃先验也不要给错的信息 */
+            if (!prior_drop_warned_) {
+                std::fprintf(stderr,
+                    "[Marg] 先验的参数块已无法与当前窗口对应，本次丢弃先验（信息会损失，"
+                    "但比喂错信息安全）。\n");
+                prior_drop_warned_ = true;
+            }
+            clearPrior();
+        }
     }
 
     /* ---- 2) 求解 ---- */
@@ -3136,12 +2426,12 @@ size_t readSensorFile(const std::string &path,
 }
 
 /* 把 GNSS blh 转 NEU，不依赖 LocalFrame 的初始化顺序 ---------------- */
-static vect3 blhToNeu(const LocalFrame &lf, const DataSensor281_t &s) {
-    return lf.blh2neu(vect3(s.posgps[0], s.posgps[1], s.posgps[2]));
+static Eigen::Vector3d blhToNeu(const LocalFrame &lf, const DataSensor281_t &s) {
+    return lf.blh2neu(Eigen::Vector3d(s.posgps[0], s.posgps[1], s.posgps[2]));
 }
 
 /* 由双天线航向 + 水平，构造初始姿态 --------------------------------- */
-static quat initAttitudeFromYaw(double yaw) {
+static Eigen::Quaterniond initAttitudeFromYaw(double yaw) {
     /* RFU ↔ ENU，yaw=0 时对齐；这里直接给水平姿态 + 航向 */
     return a2qua(0.0, 0.0, yaw);
 }
@@ -3251,7 +2541,7 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
     }
 
     LocalFrame lf;
-    lf.init(vect3(raw[first_gnss].posgps[0],
+    lf.init(Eigen::Vector3d(raw[first_gnss].posgps[0],
                   raw[first_gnss].posgps[1],
                   raw[first_gnss].posgps[2]));
 
@@ -3300,11 +2590,11 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
     CalibState calib = opt.calib_init;
     /* 兼容旧配置：如果 calib_init 未被填过，从 odo_* 与 yaw_offset 派生 */
     if (calib.sodo == 0.0 && calib.abv_pitch == 0.0 && calib.abv_yaw == 0.0 &&
-        calib.lvOD.i == 0.0 && calib.lvOD.j == 0.0 && calib.lvOD.k == 0.0 &&
+        calib.lvOD.x() == 0.0 && calib.lvOD.y() == 0.0 && calib.lvOD.z() == 0.0 &&
         calib.yaw_gnss_offset == 0.0) {
         calib.sodo           = opt.odo_sodo_init;
-        calib.abv_pitch      = opt.odo_abv.i;
-        calib.abv_yaw        = opt.odo_abv.j;
+        calib.abv_pitch      = opt.odo_abv.x();
+        calib.abv_yaw        = opt.odo_abv.y();
         calib.lvOD           = opt.odo_lvOD;
         calib.yaw_gnss_offset = opt.yaw_offset;
     }
@@ -3320,9 +2610,9 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
         /* --- 位置 --- */
         if (f.has_gnss) {
             c.has_gnss_pos = true;
-            const double pe = f.pose[0] - f.gnss_pos.i;
-            const double pn = f.pose[1] - f.gnss_pos.j;
-            const double pu = f.pose[2] - f.gnss_pos.k;
+            const double pe = f.pose[0] - f.gnss_pos.x();
+            const double pn = f.pose[1] - f.gnss_pos.y();
+            const double pu = f.pose[2] - f.gnss_pos.z();
             c.dpe = pe; c.dpn = pn; c.dpu = pu;
             c.dp_xy = std::sqrt(pe * pe + pn * pn);
             c.dp_3d = std::sqrt(pe * pe + pn * pn + pu * pu);
@@ -3331,9 +2621,9 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
         /* --- 速度 --- */
         if (f.has_gnss_vel) {
             c.has_gnss_vel = true;
-            const double ve = f.mix[0] - f.gnss_vn.i;
-            const double vn = f.mix[1] - f.gnss_vn.j;
-            const double vu = f.mix[2] - f.gnss_vn.k;
+            const double ve = f.mix[0] - f.gnss_vn.x();
+            const double vn = f.mix[1] - f.gnss_vn.y();
+            const double vu = f.mix[2] - f.gnss_vn.z();
             c.dve = ve; c.dvn = vn; c.dvu = vu;
             c.dv_xy = std::sqrt(ve * ve + vn * vn);
             c.dv_3d = std::sqrt(ve * ve + vn * vn + vu * vu);
@@ -3343,8 +2633,8 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
         if (f.has_raw_yaw) {
             const double yoff = gopt.getCalibState().yaw_gnss_offset;  // ← 实时
             c.has_gnss_yaw = true;
-            quat q(f.pose[6], f.pose[3], f.pose[4], f.pose[5]);
-            double yaw_est = q2att(q).k;
+            Eigen::Quaterniond q(f.pose[6], f.pose[3], f.pose[4], f.pose[5]);
+            double yaw_est = q2att(q).z();
             double yaw_ref = diffYaw(f.raw_yaw_conv + yoff, 0.0);
             c.dyaw_rad = diffYaw(yaw_est, yaw_ref);
             c.dyaw_deg = c.dyaw_rad / DEG;
@@ -3379,7 +2669,7 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
     /* 汇总用的轻量版（只关心位置模长，用于统计）*/
     auto evalOneFrame = [](const Frame &f, ErrorAccumulator &acc) {
         if (!f.has_gnss) return;
-        vect3 p(f.pose[0], f.pose[1], f.pose[2]);
+        Eigen::Vector3d p(f.pose[0], f.pose[1], f.pose[2]);
         double e = norm(p - f.gnss_pos);
         acc.add(f.time, e);
     };
@@ -3388,7 +2678,7 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
                 opt.calib_mode ? "标定" : "导航",
                 calib.sodo,
                 calib.abv_pitch / DEG, calib.abv_yaw / DEG,
-                calib.lvOD.i, calib.lvOD.j, calib.lvOD.k,
+                calib.lvOD.x(), calib.lvOD.y(), calib.lvOD.z(),
                 calib.yaw_gnss_offset / DEG);
 
     gopt.clearPrior();
@@ -3412,16 +2702,16 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
             yaw0 = gnssYaw2AttYaw(raw[first_gnss].yaw, opt.ant_mode, opt.yaw_offset);
             used_gnss_yaw0 = true;
         }
-        quat q0 = initAttitudeFromYaw(yaw0);
+        Eigen::Quaterniond q0 = initAttitudeFromYaw(yaw0);
         std::printf("[runner] 初始航向: %.3f deg (%-5s, 双天线原始 %.3f deg)\n",
                     yaw0 / DEG, used_gnss_yaw0 ? "GNSS" : "默认0",
                     raw[first_gnss].yaw / DEG);
 
-        f0.pose = { 0, 0, 0, q0.q1, q0.q2, q0.q3, q0.q0 };
-        f0.mix = { 0, 0, 0, 0, 0, 0, 0, 0, 0, opt.odo_sodo_init };
+        f0.pose = { 0, 0, 0, q0.x(), q0.y(), q0.z(), q0.w() };
+        f0.mix = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };   /* mix 为 {v,bg,ba}；sodo 在 calib[0] */
         f0.has_gnss = true;
-        f0.gnss_pos = vect3(0, 0, 0);   /* 局部系原点 */
-        f0.gnss_std = vect3(opt.gnss_pos_scale * std::max(raw[first_gnss].posstd[0], 0.5),
+        f0.gnss_pos = Eigen::Vector3d(0, 0, 0);   /* 局部系原点 */
+        f0.gnss_std = Eigen::Vector3d(opt.gnss_pos_scale * std::max(raw[first_gnss].posstd[0], 0.5),
                             opt.gnss_pos_scale * std::max(raw[first_gnss].posstd[1], 0.5),
                             opt.gnss_pos_scale * std::max(raw[first_gnss].posstd[2], 1.0));
         frames.push_back(f0);
@@ -3430,7 +2720,7 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
 
     PreintegrationParam pp;
     pp.gyr_arw      = 0.5 * DEG / 60.0;    /* 0.5 deg/sqrt(hr) */
-    pp.acc_vrw      = 0.1 * 1e-3;          /* 0.1 mg/sqrt(Hz) → 0.1e-3 m/s^1.5 近似 */
+    pp.acc_vrw      = 0.1 * MG;            /* 0.1 mg/sqrt(Hz) = 0.1e-3·g m/s^1.5 */
     pp.gyr_bias_std = 10.0 * DPH;          /* 10 deg/hr */
     pp.acc_bias_std = 1.0 * MG;            /* 1 mg */
     pp.corr_time    = 3600.0;
@@ -3443,7 +2733,7 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
     double t_last_kf = raw[first_gnss].t;
     double t_last_imu = t_last_kf;
     double t_preint = 0.0;               /*< 预积分累计耗时 */
-    vect3  bg_cur(O31), ba_cur(O31);     /*< 下一段预积分用的零偏 */
+    Eigen::Vector3d  bg_cur(O31), ba_cur(O31);     /*< 下一段预积分用的零偏 */
 
     /* GNSS 中断区间（相对首帧），用于考核航位推算 */
     const double t0_run = raw[first_gnss].t;
@@ -3472,8 +2762,8 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
         ImuMeas m;
         m.time   = s.t;
         m.dt     = dt;
-        m.dtheta = vect3(s.wm[0], s.wm[1], s.wm[2]);
-        m.dvel   = vect3(s.vm[0], s.vm[1], s.vm[2]);
+        m.dtheta = Eigen::Vector3d(s.wm[0], s.wm[1], s.wm[2]);
+        m.dvel   = Eigen::Vector3d(s.vm[0], s.vm[1], s.vm[2]);
         if (opt.use_odometer && s.dS < 90.0) {
             m.odovel = s.dS;   // ← 补这一行
         }
@@ -3511,40 +2801,40 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
         /* 4.4 构造新关键帧：先取上一帧快照（值拷贝，避免悬垂） */
         const Frame fprev = frames.back();
 
-        const vect3 dv_b0 = preint.v();
-        const quat   dq_b0 = preint.q();
-        const vect3  dp_b0 = preint.p();
+        const Eigen::Vector3d dv_b0 = preint.v();
+        const Eigen::Quaterniond   dq_b0 = preint.q();
+        const Eigen::Vector3d  dp_b0 = preint.p();
         const double T_k   = preint.dt();
 
-        quat q_prev(fprev.pose[6], fprev.pose[3], fprev.pose[4], fprev.pose[5]);
-        vect3 v_prev(fprev.mix[0], fprev.mix[1], fprev.mix[2]);
-        vect3 p_prev(fprev.pose[0], fprev.pose[1], fprev.pose[2]);
+        Eigen::Quaterniond q_prev(fprev.pose[6], fprev.pose[3], fprev.pose[4], fprev.pose[5]);
+        Eigen::Vector3d v_prev(fprev.mix[0], fprev.mix[1], fprev.mix[2]);
+        Eigen::Vector3d p_prev(fprev.pose[0], fprev.pose[1], fprev.pose[2]);
 
-        quat q_pred = q_prev * dq_b0;
-        normlize(&q_pred);
-        Eigen::Matrix3d R_prev = q_prev.toEigen().toRotationMatrix();
-        Eigen::Vector3d g_n = lf.earthModel().gn.toEigen();
-        Eigen::Vector3d v_pred = v_prev.toEigen()
-                               + R_prev * dv_b0.toEigen()
+        Eigen::Quaterniond q_pred = q_prev * dq_b0;
+        normlize(q_pred);
+        Eigen::Matrix3d R_prev = q_prev.toRotationMatrix();
+        Eigen::Vector3d g_n = lf.earthModel().gn;
+        Eigen::Vector3d v_pred = v_prev
+                               + R_prev * dv_b0
                                + g_n * T_k;
-        Eigen::Vector3d p_pred = p_prev.toEigen()
-                               + v_prev.toEigen() * T_k
+        Eigen::Vector3d p_pred = p_prev
+                               + v_prev * T_k
                                + 0.5 * g_n * T_k * T_k
-                               + R_prev * dp_b0.toEigen();
+                               + R_prev * dp_b0;
 
         Frame fk;
         fk.time = s.t;
         fk.pose = { p_pred(0), p_pred(1), p_pred(2),
-                    q_pred.q1, q_pred.q2, q_pred.q3, q_pred.q0 };
+                    q_pred.x(), q_pred.y(), q_pred.z(), q_pred.w() };
         fk.mix  = { v_pred(0), v_pred(1), v_pred(2),
                     fprev.mix[3], fprev.mix[4], fprev.mix[5],
-                    fprev.mix[6], fprev.mix[7], fprev.mix[8], fprev.mix[9] };
+                    fprev.mix[6], fprev.mix[7], fprev.mix[8] };
 
         /* 4.5 观测填充 */
         if (has_gnss_now) {
             fk.has_gnss = true;
             fk.gnss_pos = blhToNeu(lf, s);
-            fk.gnss_std = vect3(opt.gnss_pos_scale * std::max(s.posstd[0], 0.5),
+            fk.gnss_std = Eigen::Vector3d(opt.gnss_pos_scale * std::max(s.posstd[0], 0.5),
                                 opt.gnss_pos_scale * std::max(s.posstd[1], 0.5),
                                 opt.gnss_pos_scale * std::max(s.posstd[2], 1.0));
             st.n_gnss_used++;
@@ -3562,8 +2852,8 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
                 const double sat_scale = (s.satnum > 1.0)
                     ? std::max(1.0, 8.0 / s.satnum) : 1.0;
                 fk.has_gnss_vel = true;
-                fk.gnss_vn     = vect3(s.vngps[0], s.vngps[1], s.vngps[2]);
-                fk.gnss_vn_std = vect3(opt.gnss_vel_scale * 0.1 * sat_scale,
+                fk.gnss_vn     = Eigen::Vector3d(s.vngps[0], s.vngps[1], s.vngps[2]);
+                fk.gnss_vn_std = Eigen::Vector3d(opt.gnss_vel_scale * 0.1 * sat_scale,
                                        opt.gnss_vel_scale * 0.1 * sat_scale,
                                        opt.gnss_vel_scale * 0.2 * sat_scale);
             }
@@ -3591,7 +2881,7 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
             fk.has_odo        = true;
             fk.odo_dS         = s.dS;
             fk.odo_dt         = dt;
-            fk.odo_omega_meas = vect3(s.wm[0] / dt, s.wm[1] / dt, s.wm[2] / dt);
+            fk.odo_omega_meas = Eigen::Vector3d(s.wm[0] / dt, s.wm[1] / dt, s.wm[2] / dt);
             fk.odo_std        = opt.odo_vel_scale * opt.odo_vel_std;
             st.n_odo_used++;
         }
@@ -3646,7 +2936,7 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
                 st.n_kf_total, fk.time,
                 fk.pose[0], fk.pose[1], fk.pose[2],
                 fk.mix[0],  fk.mix[1],  fk.mix[2],
-                q2att(quat(fk.pose[6], fk.pose[3], fk.pose[4], fk.pose[5])).k / DEG,
+                q2att(Eigen::Quaterniond(fk.pose[6], fk.pose[3], fk.pose[4], fk.pose[5])).z() / DEG,
                 fk.is_static ? "STATIC" : "moving");
         }
         
@@ -3675,11 +2965,22 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
             if (frames.front().gnss_in_gap) {
                 const Frame &fg = frames.front();
                 acc_gap.add(fg.time,
-                            norm(vect3(fg.pose[0], fg.pose[1], fg.pose[2]) - fg.gnss_pos));
+                            norm(Eigen::Vector3d(fg.pose[0], fg.pose[1], fg.pose[2]) - fg.gnss_pos));
             }
 
             /* 优化后、erase 之前，保存最旧帧到完整轨迹 */
-            trajectory.push_back(frames.front());   // ← 新增
+            trajectory.push_back(frames.front());
+
+            /* 出窗前先做边缘化：把 frames[0] 的信息通过 Schur 补保留成先验，
+             * 而不是直接丢掉（原先这里只有 erase，属于"信息丢失型"滑窗）。 */
+            if (!gopt.marginalizeOldestFrame(frames, lf.earthModel().gn)) {
+                static bool marg_drop_warned = false;
+                if (!marg_drop_warned) {
+                    std::fprintf(stderr, "[Marg] 边缘化未成功，本步按丢帧处理（信息会损失）。\n");
+                    marg_drop_warned = true;
+                }
+            }
+
             frames.erase(frames.begin());
         }
 
@@ -3688,22 +2989,22 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
          *      它同时是因子中零偏一阶展开的线性化点。 */
         if (solved && !frames.empty()) {
             const Frame &fnew = frames.back();
-            bg_cur = vect3(fnew.mix[3], fnew.mix[4], fnew.mix[5]);
-            ba_cur = vect3(fnew.mix[6], fnew.mix[7], fnew.mix[8]);
+            bg_cur = Eigen::Vector3d(fnew.mix[3], fnew.mix[4], fnew.mix[5]);
+            ba_cur = Eigen::Vector3d(fnew.mix[6], fnew.mix[7], fnew.mix[8]);
             preint.setBias(bg_cur, ba_cur);
         }
     }
 
     /* ---- 5) 收尾：对最后一批关键帧跑一次优化 ---- */
     if (!frames.empty()) {
-        const vect3 g_vect = lf.earthModel().gn;
+        const Eigen::Vector3d g_vect = lf.earthModel().gn;
         gopt.optimize(frames, g_vect);
 
         /* 末尾残留帧也加入轨迹 */
         for (const auto &f : frames) {
             evalOneFrame(f, acc_opt);                /* ← 新增 */
             if (f.gnss_in_gap) {
-                acc_gap.add(f.time, norm(vect3(f.pose[0], f.pose[1], f.pose[2]) - f.gnss_pos));
+                acc_gap.add(f.time, norm(Eigen::Vector3d(f.pose[0], f.pose[1], f.pose[2]) - f.gnss_pos));
             }
             recordFrame(f);
             trajectory.push_back(f);            // ← 新增
@@ -3718,12 +3019,13 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
     std::printf("  安装角 pitch    : %+10.4f deg\n", st.calib_final.abv_pitch / DEG);
     std::printf("  安装角 yaw      : %+10.4f deg\n", st.calib_final.abv_yaw   / DEG);
     std::printf("  杆臂   lvOD     : (%+8.4f, %+8.4f, %+8.4f) m\n",
-                st.calib_final.lvOD.i, st.calib_final.lvOD.j, st.calib_final.lvOD.k);
+                st.calib_final.lvOD.x(), st.calib_final.lvOD.y(), st.calib_final.lvOD.z());
     std::printf("  航向偏置        : %+10.4f deg\n", st.calib_final.yaw_gnss_offset / DEG);
 
-    st.n_kf       = static_cast<int>(frames.size());
+    st.n_kf          = static_cast<int>(frames.size());
+    st.n_prior_added = gopt.stat_prior_blocks_added;
     st.total_time = raw.back().t - raw.front().t;
-    st.final_cost = gopt.hasPrior() ? gopt.r_prior().toEigen().norm() : 0.0;
+    st.final_cost = gopt.hasPrior() ? gopt.r_prior().norm() : 0.0;
 
     /* ---- 6) GNSS 对比统计 ---- */
     st.n_cmp_init = acc_init.size();
@@ -3869,3 +3171,1170 @@ RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,
 
     return st;
 }
+
+/* ============================================================================
+ * 以下为原 src/amb_ils.h 的内容（模糊度整数最小二乘），已并入本头文件
+ * ==========================================================================*/
+/* ============================================================================
+ * amb_ils.cpp —— 模糊度整数最小二乘（实现说明见本文件顶部 amb_ils 段）
+ *
+ * 搜索用的是标准（Teunissen）形式：
+ *     Qz⁻¹ = RᵀR  （R 上三角，Cholesky）
+ *     χ²(z) = ‖R (z − ẑ)‖² = Σ_i s_i²,   s_i = R(i,i)(z_i − ẑ_i) + Σ_{j>i} R(i,j)(z_j − ẑ_j)
+ * 从 i = n−1 **递减**扫描：第 i 步的 Σ_{j>i} 只依赖已经定下来的 z_j，
+ * 所以每层就是一个一维区间：
+ *     中心 c_i = ẑ_i − t_i / R(i,i) ,  t_i = Σ_{j>i} R(i,j)(z_j − ẑ_j)
+ *     半径 r_i = sqrt(rem) / R(i,i)
+ * 这个形式比用 LDLᵀ 的条件均值更不容易写错（早期版本把半径写成 sqrt(rem/D_i)、
+ * 中心写成 Σ L(i,j)d_j，n≥3 时是错的，导致报出的 χ² 根本不是真实二次型）。
+ * ==========================================================================*/
+
+
+
+/* LDLᵀ：Q = L D Lᵀ，L 为单位下三角。返回 false 表示 D 出现非正数。 */
+static bool ldltUnit(const Eigen::MatrixXd &Q, Eigen::MatrixXd &L, Eigen::VectorXd &D) {
+    const int n = static_cast<int>(Q.rows());
+    L = Eigen::MatrixXd::Identity(n, n);
+    D.resize(n);
+    for (int i = 0; i < n; ++i) {
+        double d = Q(i, i);
+        for (int k = 0; k < i; ++k) d -= L(i, k) * L(i, k) * D(k);
+        if (!(d > 0.0)) return false;
+        D(i) = d;
+        for (int j = i + 1; j < n; ++j) {
+            double s = Q(j, i);
+            for (int k = 0; k < i; ++k) s -= L(j, k) * L(i, k) * D(k);
+            L(j, i) = s / d;
+        }
+    }
+    return true;
+}
+
+/* Q⁻¹ = RᵀR 的上三角 R（失败表示非正定） */
+static bool cholInvUpper(const Eigen::MatrixXd &Q, Eigen::MatrixXd &R) {
+    const int n = static_cast<int>(Q.rows());
+    Eigen::LLT<Eigen::MatrixXd> llt(Q);
+    if (llt.info() != Eigen::Success) return false;
+    const Eigen::MatrixXd Winv = llt.solve(Eigen::MatrixXd::Identity(n, n));
+    Eigen::LLT<Eigen::MatrixXd> llt2(Winv);
+    if (llt2.info() != Eigen::Success) return false;
+    R = llt2.matrixU();                       /* Winv = Rᵀ R */
+    return (R.diagonal().array() > 0.0).all();
+}
+
+static double normCdf(double x) { return 0.5 * std::erfc(-x / std::sqrt(2.0)); }
+
+/* χ²(z) = ‖R(z − ẑ)‖² */
+static double quadFormR(const Eigen::MatrixXd &R, const Eigen::VectorXd &z,
+                        const Eigen::VectorXd &a) {
+    const Eigen::VectorXd d = z - a;
+    return (R * d).squaredNorm();
+}
+
+/* 去相关：整数 Gauss 变换（把 |L(k,i)| 压到 0.5 以内）+ 按条件方差升序重排。
+ * 只维护整数变换 T，Qt = Tᵀ Q T、at = Tᵀ a 每次都从 T 重算，避免增量更新出错。
+ * 关键性质：所用的 Gauss 变换保持 D 不变。 */
+static int decorrelate(const Eigen::MatrixXd &Q, Eigen::MatrixXd &T,
+                       Eigen::MatrixXd &Qt, Eigen::VectorXd &at,
+                       const Eigen::VectorXd &a, int max_pass = 30) {
+    const int n = static_cast<int>(Q.rows());
+    T  = Eigen::MatrixXd::Identity(n, n);   /* z = Tᵀ a 的 T */
+    Qt = Q;
+    at = a;
+    int n_gauss = 0;
+
+    for (int pass = 0; pass < max_pass; ++pass) {
+        Eigen::MatrixXd L;
+        Eigen::VectorXd D;
+        if (!ldltUnit(Qt, L, D)) break;
+        bool changed = false;
+
+        for (int k = n - 1; k >= 1; --k) {
+            for (int i = k - 1; i >= 0; --i) {
+                if (!ldltUnit(Qt, L, D)) break;
+                const double mu = std::round(L(k, i));
+                if (mu == 0.0) continue;
+                /* 取 G = I − μ·e_i e_kᵀ（G(i,k) = −μ），Qz = Gᵀ Q G 满足
+                 *   L(k,i) ← L(k,i) − μ 且 D 不变
+                 * 这正是 LAMBDA 去相关的关键性质；方向写反会改动 D，
+                 * 反而把条件数搞差、枚举爆掉。T ← T·G ⇒ T.col(k) −= μ·T.col(i)。 */
+                T.col(k) -= mu * T.col(i);
+                Qt = T.transpose() * Q * T;
+                at = T.transpose() * a;
+                ++n_gauss;
+                changed = true;
+            }
+        }
+
+        /* 按条件方差升序重排（置换矩阵同样是幺模整数变换） */
+        if (!ldltUnit(Qt, L, D)) break;
+        std::vector<int> idx(n);
+        for (int i = 0; i < n; ++i) idx[i] = i;
+        std::sort(idx.begin(), idx.end(), [&](int p, int q) { return D(p) < D(q); });
+        bool sorted = true;
+        for (int i = 0; i < n; ++i) if (idx[i] != i) { sorted = false; break; }
+        if (!sorted) {
+            Eigen::MatrixXd P = Eigen::MatrixXd::Zero(n, n);
+            for (int i = 0; i < n; ++i) P(i, idx[i]) = 1.0;
+            /* 目标：新下标 j 对应旧下标 idx[j]，即 at_new = P·at_old（P(j,idx[j])=1）。
+             * 由 Qt = Tᵀ Q T、at = Tᵀ a 可知必须 T ← T·Pᵀ。
+             * Ti 不再增量维护：最后一次性求 T⁻ᵀ 并做整数校验（见 ilsResolve）。 */
+            T = T * P.transpose();
+            Qt = T.transpose() * Q * T;
+            at = T.transpose() * a;
+            changed = true;
+        }
+
+        if (!changed) break;
+    }
+    return n_gauss;
+}
+
+bool ilsResolve(const Eigen::VectorXd &a, const Eigen::MatrixXd &Q,
+                IlsResult *out, double ratio_thresh, long max_nodes) {
+    const int n = static_cast<int>(a.size());
+    IlsResult r;
+    r.n = n;
+    r.a_float = a;
+    if (n <= 0 || Q.rows() != n || Q.cols() != n) { if (out) *out = r; return false; }
+
+    r.cond_before = Q.diagonal().maxCoeff() / std::max(1e-300, Q.diagonal().minCoeff());
+
+    /* 条件标准差（原空间序）：原始 Q 的 LDLᵀ 的 D 开方 */
+    {
+        Eigen::MatrixXd L0;
+        Eigen::VectorXd D0;
+        if (ldltUnit(Q, L0, D0)) {
+            r.cond_sigma.resize(n);
+            for (int i = 0; i < n; ++i) r.cond_sigma(i) = std::sqrt(std::max(0.0, D0(i)));
+        }
+    }
+
+    Eigen::MatrixXd T, Qt;
+    Eigen::VectorXd at;
+    r.n_decorr = decorrelate(Q, T, Qt, at, a);
+    r.cond_after = Qt.diagonal().maxCoeff() / std::max(1e-300, Qt.diagonal().minCoeff());
+
+    Eigen::MatrixXd R;
+    if (!cholInvUpper(Qt, R)) { if (out) *out = r; return false; }
+
+    /* 一次性求 Ti = T⁻ᵀ，并做**整数校验**：Ti·Tᵀ == I 且 |det T| == 1。
+     * 校验不过就判不可信（宁可不固定，也不给可能错的解）。 */
+    Eigen::MatrixXd Ti;
+    {
+        const Eigen::MatrixXd Tt = T.transpose();               /* 物化，避免表达式临时对象 */
+        Ti = Tt.partialPivLu().solve(Eigen::MatrixXd::Identity(n, n)).array().round();
+        const double err = (Ti * Tt - Eigen::MatrixXd::Identity(n, n)).cwiseAbs().maxCoeff();
+        const double det = std::fabs(T.determinant());
+        r.T_mat  = T;
+        r.Ti_mat = Ti;
+        if (err > 0.5 || std::fabs(det - 1.0) > 1e-6) { if (out) *out = r; return false; }
+    }
+
+    /* 回原空间：a = Ti · z（Ti = T⁻ᵀ 是整数矩阵，乘法精确） */
+    auto backToA = [&](const Eigen::VectorXd &z) {
+        return (Ti * z).array().round().matrix();
+    };
+
+    /* ---- 1) 引导解（从后往前条件取整）给上界 ---- */
+    Eigen::VectorXd zb = Eigen::VectorXd::Zero(n);
+    for (int i = n - 1; i >= 0; --i) {
+        double t = 0.0;
+        for (int j = i + 1; j < n; ++j) t += R(i, j) * (zb(j) - at(j));
+        zb(i) = std::round(at(i) - t / R(i, i));
+    }
+    const double sq_boot = quadFormR(R, zb, at);
+    r.a_boot = backToA(zb);
+
+    double p = 1.0;
+    for (int i = 0; i < n; ++i) p *= (2.0 * normCdf(0.5 * R(i, i)) - 1.0);
+    r.p_boot = p;
+
+    /* ---- 2) 椭球枚举 ---- */
+    /* 上界固定为 ratio_thresh · χ²_boot，不随 best 收缩：
+     * 若区域内找不到第二个格点，则真次优 > ratio_thresh·χ²_boot ≥ ratio_thresh·χ²_best
+     * ⇒ ratio > 门限 ⇒ 判可固定；这个推理是严格的，所以不会引入"假固定"。 */
+    const double limit0 = ratio_thresh * sq_boot;
+    /* 比较容差按问题尺度取（相对 sq_boot），保证 Q 与 c·Q 给出完全一致的结果 */
+    const double tol_sq = 1e-12 * std::max(sq_boot, std::numeric_limits<double>::min());
+    double best = sq_boot, second = std::numeric_limits<double>::infinity();
+    Eigen::VectorXd zbest = zb, zsecond;
+    long nodes = 0;
+    bool overflow = false;
+    Eigen::VectorXd z = zb;
+
+    struct Frame { int i; double partial; int lo, hi, cur; };
+    std::vector<Frame> st;
+
+    auto pushFrame = [&](int i, double partial) {
+        const double rem = limit0 - partial;
+        if (rem <= 0.0 || i < 0) return;
+        double t = 0.0;
+        for (int j = i + 1; j < n; ++j) t += R(i, j) * (z(j) - at(j));
+        const double center = at(i) - t / R(i, i);
+        const double rad = std::sqrt(rem) / R(i, i);
+        Frame f;
+        f.i = i;
+        f.partial = partial;
+        f.lo = static_cast<int>(std::ceil(center - rad - 1e-9));
+        f.hi = static_cast<int>(std::floor(center + rad + 1e-9));
+        f.cur = f.lo;
+        if (f.lo <= f.hi) st.push_back(f);
+    };
+
+    pushFrame(n - 1, 0.0);
+    if (st.empty()) { if (out) *out = r; return false; }
+
+    while (!st.empty()) {
+        if (++nodes > max_nodes) { overflow = true; break; }
+        Frame &fr = st.back();
+        if (fr.cur > fr.hi) { st.pop_back(); continue; }
+        const int i = fr.i;
+        const int zi = fr.cur++;
+        z(i) = zi;
+
+        double t = 0.0;
+        for (int j = i + 1; j < n; ++j) t += R(i, j) * (z(j) - at(j));
+        const double s = R(i, i) * (zi - at(i)) + t;
+        const double partial = fr.partial + s * s;
+
+        if (i == 0) {
+            if (partial < best - tol_sq) {
+                second = best; zsecond = zbest;
+                best = partial; zbest = z;
+            } else if (partial < second - tol_sq) {
+                bool same = true;
+                for (int q = 0; q < n; ++q) if (std::fabs(z(q) - zbest(q)) > 0.5) { same = false; break; }
+                if (!same) { second = partial; zsecond = z; }
+            }
+        } else {
+            pushFrame(i - 1, partial);
+        }
+    }
+
+    r.nodes = nodes;
+    r.sq_best = best;
+    r.sq_second = second;
+    r.a_fixed = backToA(zbest);
+    if (best <= 0.0) {
+        /* 浮点解恰好落在整数格点上：最优即唯一，视为可固定 */
+        r.ratio = std::numeric_limits<double>::infinity();
+    } else {
+        r.ratio = std::isfinite(second) ? second / best
+                                        : std::numeric_limits<double>::infinity();
+    }
+
+    r.ratio_boot = sq_boot / best;   /* 引导解 vs 最优解 */
+
+    /* ok 只表示“枚举正常完成”。ratio = inf 表示在 ratio_thresh·X2_boot 区域内
+     * 找不到第二个格点 => 真次优 > 门限·X2_best => 可固定，这是**成功**而非失败
+     * （早先要求 isfinite(ratio) 会把这种最好的情形误判成“未固定”）。 */
+    r.ok = !overflow && std::isfinite(r.sq_best);
+    if (out) *out = r;
+    return r.ok;
+}
+
+bool ilsResolveBrute(const Eigen::VectorXd &a, const Eigen::MatrixXd &Q,
+                     int range, IlsResult *out) {
+    const int n = static_cast<int>(a.size());
+    IlsResult r;
+    r.n = n;
+    r.a_float = a;
+    if (n <= 0 || Q.rows() != n) { if (out) *out = r; return false; }
+
+    Eigen::MatrixXd R;
+    if (!cholInvUpper(Q, R)) { if (out) *out = r; return false; }
+
+    std::vector<int> base(n);
+    for (int i = 0; i < n; ++i) base[i] = static_cast<int>(std::lround(a(i)));
+
+    double best = std::numeric_limits<double>::infinity();
+    double second = std::numeric_limits<double>::infinity();
+    Eigen::VectorXd z(n), zbest, zsecond;
+    std::vector<int> off(n, 0);
+    long nodes = 0;
+
+    while (true) {
+        ++nodes;
+        for (int i = 0; i < n; ++i) z(i) = base[i] + off[i] - range;
+        const double sq = quadFormR(R, z, a);
+        if (sq < best - 1e-12) { second = best; zsecond = zbest; best = sq; zbest = z; }
+        else if (sq < second - 1e-12) { second = sq; zsecond = z; }
+
+        /* 标准里程计：off[k] ∈ [0, 2·range]，z = base + off − range。
+         * （早先写成"到 range 就置 -range 并同时进位"，会漏掉一整片状态。） */
+        int k = 0;
+        while (k < n && off[k] == 2 * range) { off[k] = 0; ++k; }
+        if (k >= n) break;
+        ++off[k];
+    }
+
+    r.a_fixed = zbest;
+    r.a_boot = zbest;
+    r.sq_best = best;
+    r.sq_second = second;
+    r.ratio = std::isfinite(second) ? second / best : std::numeric_limits<double>::infinity();
+    r.nodes = nodes;
+    r.ok = std::isfinite(best);
+    if (out) *out = r;
+    return r.ok;
+}
+
+
+/* ============================================================================
+ * 部分固定（partial AR）
+ * ==========================================================================*/
+bool ilsPartialFix(const Eigen::VectorXd &a, const Eigen::MatrixXd &Q,
+                   double ratio_thresh, int min_fix, long max_nodes,
+                   IlsPartial *out) {
+    IlsPartial res;
+    const int n = static_cast<int>(a.size());
+    res.n_full = n;
+    res.a_fixed = a;
+    if (n <= 0 || Q.rows() != n) { if (out) *out = res; return false; }
+    if (min_fix < 1) min_fix = 1;
+    if (min_fix > n) min_fix = n;
+
+    /* 条件标准差排序（小 = 有把握） */
+    Eigen::MatrixXd L0;
+    Eigen::VectorXd D0;
+    if (!ldltUnit(Q, L0, D0)) { if (out) *out = res; return false; }
+    res.cond_sigma.resize(n);
+    for (int i = 0; i < n; ++i) res.cond_sigma(i) = std::sqrt(std::max(0.0, D0(i)));
+
+    std::vector<int> order(n);
+    for (int i = 0; i < n; ++i) order[i] = i;
+    std::sort(order.begin(), order.end(),
+              [&](int p, int q) { return res.cond_sigma(p) < res.cond_sigma(q); });
+
+    /* 从"固定全部"往下退，取第一个能通过门限的子集 */
+    for (int k = n; k >= min_fix; --k) {
+        ++res.n_tried;
+        std::vector<int> idx(order.begin(), order.begin() + k);
+        std::sort(idx.begin(), idx.end());
+
+        Eigen::VectorXd asub(k);
+        Eigen::MatrixXd Qsub(k, k);
+        for (int i = 0; i < k; ++i) {
+            asub(i) = a(idx[static_cast<size_t>(i)]);
+            for (int j = 0; j < k; ++j)
+                Qsub(i, j) = Q(idx[static_cast<size_t>(i)], idx[static_cast<size_t>(j)]);
+        }
+
+        IlsResult r;
+        if (!ilsResolve(asub, Qsub, &r, ratio_thresh, max_nodes)) continue;
+        if (!(r.ratio > ratio_thresh)) continue;
+
+        res.ok = true;
+        res.fixed_idx = idx;
+        res.last = r;
+        for (int i = 0; i < k; ++i)
+            res.a_fixed(idx[static_cast<size_t>(i)]) = r.a_fixed(i);
+        if (out) *out = res;
+        return true;
+    }
+
+    if (out) *out = res;
+    return false;
+}
+
+
+/* ============================================================================
+ * 以下为原 src/gnss_dd.h 的内容（RINEX → 双差 DDObs 生产者），已并入本头文件
+ * ==========================================================================*/
+/* ============================================================================
+ * gnss_dd.cpp —— RINEX 3 观测/星历 → 双差 DDObs 的生产者
+ * 符号约定见本文件顶部 gnss_dd 段（与 GnssDD*Residual 严格一致）。
+ * ==========================================================================*/
+
+
+/* ============================ 时间 ============================ */
+/* Howard Hinnant 的 days_from_civil：自 1970-01-01 起的天数 */
+static long daysFromCivil(int y, unsigned m, unsigned d) {
+    y -= (m <= 2);
+    const long era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned doy = (153u * (m + (m > 2 ? -3u : 9u)) + 2u) / 5u + d - 1u;
+    const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+    return era * 146097L + static_cast<long>(doe) - 719468L;
+}
+
+double civilToGpsSec(int year, int month, int day, int hour, int minute, double sec) {
+    static const long gps_epoch_day = daysFromCivil(1980, 1, 6);
+    const long day_num = daysFromCivil(year, static_cast<unsigned>(month),
+                                       static_cast<unsigned>(day));
+    return static_cast<double>(day_num - gps_epoch_day) * 86400.0
+         + hour * 3600.0 + minute * 60.0 + sec;
+}
+
+void gpsSecToCivil(double t_gps, int *year, int *month, int *day,
+                   int *hour, int *minute, double *sec) {
+    static const long gps_epoch_day = daysFromCivil(1980, 1, 6);
+    const double fd = std::floor(t_gps / 86400.0);
+    const long days = static_cast<long>(fd) + gps_epoch_day;
+    double rem = t_gps - fd * 86400.0;
+
+    const long z = days + 719468L;
+    const long era = (z >= 0 ? z : z - 146096L) / 146097L;
+    const unsigned doe = static_cast<unsigned>(z - era * 146097L);
+    const unsigned yoe = (doe - doe / 1460u + doe / 36524u - doe / 146096u) / 365u;
+    const int yy = static_cast<int>(yoe) + static_cast<int>(era) * 400;
+    const unsigned doy = doe - (365u * yoe + yoe / 4u - yoe / 100u);
+    const unsigned mp = (5u * doy + 2u) / 153u;
+    const unsigned dd = doy - (153u * mp + 2u) / 5u + 1u;
+    const unsigned mm = mp + (mp < 10u ? 3u : static_cast<unsigned>(-9));
+    if (year)  *year  = yy + (mm <= 2u ? 1 : 0);
+    if (month) *month = static_cast<int>(mm);
+    if (day)   *day   = static_cast<int>(dd);
+    const int hh = static_cast<int>(rem / 3600.0); rem -= hh * 3600.0;
+    const int mi = static_cast<int>(rem / 60.0);   rem -= mi * 60.0;
+    if (hour)   *hour   = hh;
+    if (minute) *minute = mi;
+    if (sec)    *sec    = rem;
+}
+
+/* ============================ 小工具 ============================ */
+static inline std::string trim(const std::string &s) {
+    size_t a = 0, b = s.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+    return s.substr(a, b - a);
+}
+
+/* RINEX 的 D 指数 → C 的 E 指数 */
+static double parseD(const std::string &s) {
+    std::string t = trim(s);
+    if (t.empty()) return 0.0;
+    for (char &c : t) if (c == 'D' || c == 'd') c = 'E';
+    return std::strtod(t.c_str(), nullptr);
+}
+
+static double field19(const std::string &buf, size_t off) {
+    if (off >= buf.size()) return 0.0;
+    return parseD(buf.substr(off, 19));
+}
+
+/* ============================ 观测文件读取 ============================ */
+bool readRinex3Obs(const std::string &path,
+                   const std::vector<ObsRequest> &reqs,
+                   std::vector<RinexEpoch> &epochs,
+                   RinexObsHeader *hdr) {
+    std::ifstream in(path);
+    if (!in) {
+        std::fprintf(stderr, "[RINEX] 打不开观测文件: %s\n", path.c_str());
+        return false;
+    }
+
+    RinexObsHeader h;
+    std::string line;
+    bool header_done = false;
+    char cur_sys = 0;                 /* 头部续行沿用上一个系统 */
+
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.size() < 60) continue;
+        const std::string label = trim(line.substr(60));
+        if (label == "END OF HEADER") { header_done = true; break; }
+
+        if (label == "RINEX VERSION / TYPE") {
+            h.version = std::atof(line.substr(0, 9).c_str());
+        } else if (label == "INTERVAL") {
+            h.interval = std::atof(line.substr(0, 10).c_str());
+        } else if (label == "APPROX POSITION XYZ") {
+            h.approx_pos = Eigen::Vector3d(std::atof(line.substr(0, 14).c_str()),
+                                           std::atof(line.substr(14, 14).c_str()),
+                                           std::atof(line.substr(28, 14).c_str()));
+            h.approx_pos_valid = h.approx_pos.norm() > 1.0e6;
+        } else if (label == "MARKER NAME") {
+            h.marker = trim(line.substr(0, 60));
+        } else if (label == "TIME OF FIRST OBS") {
+            int Y = 0, M = 0, D = 0, hh = 0, mm = 0; double ss = 0.0;
+            std::sscanf(line.c_str(), "%d %d %d %d %d %lf", &Y, &M, &D, &hh, &mm, &ss);
+            h.t_first = civilToGpsSec(Y, M, D, hh, mm, ss);
+        } else if (label == "TIME OF LAST OBS") {
+            int Y = 0, M = 0, D = 0, hh = 0, mm = 0; double ss = 0.0;
+            std::sscanf(line.c_str(), "%d %d %d %d %d %lf", &Y, &M, &D, &hh, &mm, &ss);
+            h.t_last = civilToGpsSec(Y, M, D, hh, mm, ss);
+        } else if (label == "SYS / # / OBS TYPES") {
+            if (std::isalpha(static_cast<unsigned char>(line[0]))) {
+                cur_sys = line[0];
+                const int n = std::atoi(line.substr(3, 3).c_str());
+                std::vector<std::string> &vec = h.obs_types[cur_sys];
+                vec.clear();
+                vec.reserve(static_cast<size_t>(n));
+                for (int k = 0; k < 13 && static_cast<int>(vec.size()) < n; ++k) {
+                    const size_t off = 7 + 4 * static_cast<size_t>(k);
+                    if (off + 3 > 60) break;
+                    const std::string t = trim(line.substr(off, 3));
+                    if (!t.empty()) vec.push_back(t);
+                }
+            } else if (cur_sys) {
+                std::vector<std::string> &vec = h.obs_types[cur_sys];
+                for (int k = 0; k < 13; ++k) {
+                    const size_t off = 7 + 4 * static_cast<size_t>(k);
+                    if (off + 3 > 60) break;
+                    const std::string t = trim(line.substr(off, 3));
+                    if (!t.empty()) vec.push_back(t);
+                }
+            }
+        }
+    }
+    if (!header_done) {
+        std::fprintf(stderr, "[RINEX] 头部没有 END OF HEADER: %s\n", path.c_str());
+        return false;
+    }
+
+    /* ---- 请求 → 每系统的列索引 ---- */
+    const int n_req = static_cast<int>(std::min<size_t>(reqs.size(), 12));
+    std::array<char, 12> req_sys{};
+    std::vector<int> req_col(reqs.size(), -1);
+    for (int k = 0; k < n_req; ++k) {
+        req_sys[static_cast<size_t>(k)] = reqs[static_cast<size_t>(k)].sys;
+        auto it = h.obs_types.find(reqs[static_cast<size_t>(k)].sys);
+        if (it == h.obs_types.end()) continue;
+        for (size_t j = 0; j < it->second.size(); ++j) {
+            if (it->second[j] == reqs[static_cast<size_t>(k)].type) {
+                req_col[static_cast<size_t>(k)] = static_cast<int>(j);
+                break;
+            }
+        }
+    }
+
+    /* ---- 历元 ---- */
+    epochs.clear();
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] != '>') continue;
+
+        int Y = 0, M = 0, D = 0, hh = 0, mm = 0, flag = 0, nsat = 0;
+        double ss = 0.0, clk = 0.0;
+        std::sscanf(line.c_str(), "> %d %d %d %d %d %lf %d %d %lf",
+                    &Y, &M, &D, &hh, &mm, &ss, &flag, &nsat, &clk);
+
+        RinexEpoch ep;
+        ep.t = civilToGpsSec(Y, M, D, hh, mm, ss);
+        ep.flag = flag;
+
+        if (flag == 0 || flag == 1) {
+            ep.sats.reserve(static_cast<size_t>(std::max(0, nsat)));
+            for (int s = 0; s < nsat; ++s) {
+                if (!std::getline(in, line)) break;
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.size() < 3) continue;
+                const char sys = line[0];
+                if (!std::isalpha(static_cast<unsigned char>(sys))) continue;
+
+                RinexSatObs so;
+                so.sys = sys;
+                so.prn = std::atoi(line.substr(1, 2).c_str());
+                bool any = false;
+                for (int k = 0; k < n_req; ++k) {
+                    if (req_sys[static_cast<size_t>(k)] != sys) continue;
+                    const int col = req_col[static_cast<size_t>(k)];
+                    if (col < 0) continue;
+                    const size_t off = 3 + 16 * static_cast<size_t>(col);
+                    if (off + 14 > line.size()) continue;
+                    const std::string vstr = line.substr(off, 14);
+                    if (trim(vstr).empty()) continue;
+                    so.val[static_cast<size_t>(k)] = std::atof(vstr.c_str());
+                    if (off + 14 < line.size()) {
+                        const char lli = line[off + 14];
+                        if (lli >= '0' && lli <= '9') so.lli[static_cast<size_t>(k)] = lli - '0';
+                    }
+                    if (off + 15 < line.size()) {
+                        const char sn = line[off + 15];
+                        if (sn >= '0' && sn <= '9') so.snr[static_cast<size_t>(k)] = sn - '0';
+                    }
+                    so.has[static_cast<size_t>(k)] = true;
+                    any = true;
+                }
+                if (any) ep.sats.push_back(so);
+            }
+        }
+        epochs.push_back(std::move(ep));
+    }
+
+    h.n_epochs = static_cast<int>(epochs.size());
+    if (hdr) *hdr = h;
+    if (epochs.empty()) {
+        std::fprintf(stderr, "[RINEX] %s 没读到任何历元\n", path.c_str());
+        return false;
+    }
+    return true;
+}
+
+/* ============================ 导航文件读取 ============================ */
+static bool isNavRecordStart(const std::string &l) {
+    if (l.size() < 4) return false;
+    if (!std::isalpha(static_cast<unsigned char>(l[0]))) return false;
+    if (!std::isdigit(static_cast<unsigned char>(l[1]))) return false;
+    if (!std::isdigit(static_cast<unsigned char>(l[2]))) return false;
+    return l[3] == ' ' || l[3] == '\t';
+}
+
+bool readRinex3Nav(const std::string &path,
+                   std::map<char, std::map<int, std::vector<KeplerEph>>> &out,
+                   int *n_glonass_skipped) {
+    std::ifstream in(path);
+    if (!in) {
+        std::fprintf(stderr, "[RINEX] 打不开导航文件: %s\n", path.c_str());
+        return false;
+    }
+    std::string line;
+    bool header_done = false;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.size() >= 60 && trim(line.substr(60)) == "END OF HEADER") {
+            header_done = true;
+            break;
+        }
+    }
+    if (!header_done) {
+        std::fprintf(stderr, "[RINEX] 导航文件没有 END OF HEADER: %s\n", path.c_str());
+        return false;
+    }
+
+    int n_glo = 0;
+    std::vector<std::string> rec;
+
+    auto flush = [&]() {
+        if (rec.empty()) return;
+        const std::string &l0 = rec[0];
+        if (l0.size() < 23) { rec.clear(); return; }
+        const char sys = l0[0];
+        const int prn = std::atoi(l0.substr(1, 2).c_str());
+        if (sys == 'R') { ++n_glo; rec.clear(); return; }   /* GLONASS 状态向量，暂不支持 */
+        if (sys == 'S') { rec.clear(); return; }            /* SBAS */
+
+        int Y = 0, M = 0, D = 0, hh = 0, mm = 0; double ss = 0.0;
+        std::sscanf(l0.c_str() + 3, "%d %d %d %d %d %lf", &Y, &M, &D, &hh, &mm, &ss);
+
+        KeplerEph e;
+        e.sys = sys;
+        e.prn = prn;
+        e.toc = civilToGpsSec(Y, M, D, hh, mm, ss);
+        e.af0 = field19(l0, 23);
+        e.af1 = field19(l0, 42);
+        e.af2 = field19(l0, 61);
+
+        /* 续行是"4 个空格 + 4×19.12"。注意字段起点是 4 + 19k，不是 19k ——
+         * 若按 19k 取窗，会把数值的指数位截掉（例如 2.592000000000E+05 变成 E+0）。 */
+        auto f = [&](size_t li, size_t fi) -> double {
+            if (li >= rec.size()) return 0.0;
+            return field19(rec[li], 4u + 19u * fi);
+        };
+        e.Crs       = f(1, 1);
+        e.delta_n   = f(1, 2);
+        e.M0        = f(1, 3);
+        e.Cuc       = f(2, 0);
+        e.e         = f(2, 1);
+        e.Cus       = f(2, 2);
+        e.sqrt_a    = f(2, 3);
+        e.toe       = f(3, 0);
+        e.Cic       = f(3, 1);
+        e.OMEGA0    = f(3, 2);
+        e.Cis       = f(3, 3);
+        e.i0        = f(4, 0);
+        e.Crc       = f(4, 1);
+        e.omega     = f(4, 2);
+        e.OMEGA_DOT = f(4, 3);
+        e.idot      = f(5, 0);
+        e.week      = static_cast<int>(f(5, 2));
+        e.accuracy  = f(6, 0);
+        e.health    = f(6, 1);
+        e.tgd       = f(6, 2);
+
+        e.valid = (e.sqrt_a > 1000.0 && e.toe > 0.0);
+        if (e.valid) out[sys][prn].push_back(e);
+        rec.clear();
+    };
+
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+        if (isNavRecordStart(line)) {
+            flush();
+            rec.clear();
+            rec.push_back(line);
+        } else if (!rec.empty()) {
+            rec.push_back(line);
+        }
+    }
+    flush();
+
+    if (n_glonass_skipped) *n_glonass_skipped = n_glo;
+
+    size_t total = 0;
+    for (auto &kv : out) for (auto &k2 : kv.second) total += k2.second.size();
+    if (total == 0) {
+        std::fprintf(stderr, "[RINEX] %s 没解析出任何星历\n", path.c_str());
+        return false;
+    }
+    return true;
+}
+
+/* ============================ 卫星位置 ============================ */
+static constexpr double OMEGA_E = 7.2921151467e-5;
+static constexpr double GM_GPS  = 3.986005e14;
+static constexpr double GM_BDS  = 3.986004418e14;
+static constexpr double GM_GAL  = 3.986004418e14;
+
+bool satPosFromEph(const KeplerEph &e, double t_tx,
+                   Eigen::Vector3d &pos, double *clk) {
+    if (!e.valid || e.sqrt_a < 1000.0) return false;
+
+    const double GM = (e.sys == 'C') ? GM_BDS : ((e.sys == 'E') ? GM_GAL : GM_GPS);
+    const double A  = e.sqrt_a * e.sqrt_a;
+    const double n0 = std::sqrt(GM / (A * A * A));
+    const double n  = n0 + e.delta_n;
+
+    double tk = t_tx - e.toe;
+    while (tk >  302400.0) tk -= 604800.0;
+    while (tk < -302400.0) tk += 604800.0;
+
+    const double M = e.M0 + n * tk;
+    double E = M;
+    for (int it = 0; it < 15; ++it) {
+        const double dE = (E - e.e * std::sin(E) - M) / (1.0 - e.e * std::cos(E));
+        E -= dE;
+        if (std::fabs(dE) < 1e-13) break;
+    }
+    const double sinE = std::sin(E), cosE = std::cos(E);
+    const double v = std::atan2(std::sqrt(1.0 - e.e * e.e) * sinE, cosE - e.e);
+    const double phi = v + e.omega;
+    const double s2 = std::sin(2.0 * phi), c2 = std::cos(2.0 * phi);
+
+    const double u = phi + e.Cus * s2 + e.Cuc * c2;
+    const double r = A * (1.0 - e.e * cosE) + e.Crs * s2 + e.Crc * c2;
+    const double i = e.i0 + e.idot * tk + e.Cis * s2 + e.Cic * c2;
+
+    const double xp = r * std::cos(u);
+    const double yp = r * std::sin(u);
+
+    if (e.sys == 'C' && e.prn <= 5) {
+        /* BDS GEO：ICD 的另一套旋转 */
+        const double Om  = e.OMEGA0 + e.OMEGA_DOT * tk - OMEGA_E * e.toe;
+        const double a1  =  std::sin(Om) * xp + std::cos(Om) * std::cos(i) * yp;
+        const double b1  = -std::cos(Om) * xp + std::sin(Om) * std::cos(i) * yp;
+        const double c1  =  std::sin(i) * yp;
+        const double Omk = Om - OMEGA_E * tk;
+        const double c5  = std::cos(-5.0 * DEG), s5 = std::sin(-5.0 * DEG);
+        pos.x() =  a1 * std::cos(Omk) + b1 * std::sin(Omk) * c5 + c1 * std::sin(Omk) * s5;
+        pos.y() = -a1 * std::sin(Omk) + b1 * std::cos(Omk) * c5 + c1 * std::cos(Omk) * s5;
+        pos.z() = -b1 * s5 + c1 * c5;
+    } else {
+        const double Om = e.OMEGA0 + (e.OMEGA_DOT - OMEGA_E) * tk - OMEGA_E * e.toe;
+        pos.x() = xp * std::cos(Om) - yp * std::cos(i) * std::sin(Om);
+        pos.y() = xp * std::sin(Om) + yp * std::cos(i) * std::cos(Om);
+        pos.z() = yp * std::sin(i);
+    }
+
+    if (clk) {
+        double dts = e.af0 + e.af1 * tk + e.af2 * tk * tk;
+        dts -= 2.0 * std::sqrt(GM * A) / (CLIGHT * CLIGHT) * e.e * sinE;
+        *clk = dts;
+    }
+    return true;
+}
+
+/* 迭代求发射时刻（考虑传播时延与地球自转） */
+static bool satPosAtRx(const KeplerEph &e, double t_rx, const Eigen::Vector3d &rx,
+                       Eigen::Vector3d &pos, double *clk) {
+    double tau = 0.07;
+    double dt_clk = 0.0;
+    for (int it = 0; it < 3; ++it) {
+        if (!satPosFromEph(e, t_rx - tau, pos, clk)) return false;
+        dt_clk = clk ? *clk : 0.0;
+        tau = (pos - rx).norm() / CLIGHT;
+    }
+    /* 地球自转改正：信号传播期间地球转了 ω·τ */
+    const double theta = OMEGA_E * tau;
+    const double ct = std::cos(theta), st = std::sin(theta);
+    const double x =  ct * pos.x() + st * pos.y();
+    const double y = -st * pos.x() + ct * pos.y();
+    pos.x() = x;
+    pos.y() = y;
+    if (clk) *clk = dt_clk;
+    return true;
+}
+
+/* ============================ 请求表 ============================ */
+std::vector<ObsRequest> buildObsRequests(const std::vector<DdSignal> &slots,
+                                         std::vector<std::array<int, 3>> *slot_index) {
+    std::vector<ObsRequest> reqs;
+    if (slot_index) slot_index->clear();
+    const size_t n = std::min<size_t>(slots.size(), MAX_FREQ);
+    for (size_t s = 0; s < n; ++s) {
+        std::array<int, 3> idx{-1, -1, -1};
+        const char *codes[3] = {slots[s].code_P.c_str(), slots[s].code_L.c_str(),
+                                slots[s].code_D.c_str()};
+        for (int j = 0; j < 3; ++j) {
+            if (codes[j][0] == '\0') continue;
+            idx[static_cast<size_t>(j)] = static_cast<int>(reqs.size());
+            ObsRequest r;
+            r.sys  = slots[s].sys;
+            r.type = codes[j];
+            reqs.push_back(r);
+        }
+        if (slot_index) slot_index->push_back(idx);
+    }
+    return reqs;
+}
+
+/* ============================ 双差生产 ============================ */
+namespace {
+struct SatKey {
+    char sys;
+    int  prn;
+    bool operator<(const SatKey &o) const {
+        return (sys != o.sys) ? (sys < o.sys) : (prn < o.prn);
+    }
+};
+struct Cand {
+    SatKey key;
+    const RinexSatObs *rover{nullptr};
+    const RinexSatObs *base{nullptr};
+    Eigen::Vector3d pos;
+    double clk{0.0};
+    double elev{0.0};
+};
+}  /* namespace */
+
+/* ============================ MW 周跳探测 ============================ */
+bool ddMelbourneWubbena(const DDObs &dd, int f1, int f2, double *n_wl) {
+    if (f1 < 0 || f2 < 0 || f1 >= MAX_FREQ || f2 >= MAX_FREQ || f1 == f2) return false;
+    if (!dd.has_P[f1] || !dd.has_L[f1] || !dd.has_P[f2] || !dd.has_L[f2]) return false;
+    const double fr1 = GPS_FREQ[f1].freq_hz, fr2 = GPS_FREQ[f2].freq_hz;
+    const double lam_wl = CLIGHT / (fr1 - fr2);
+
+    /* 宽巷相位（周） */
+    const double L_wl = (fr1 * dd.dd_L[f1] - fr2 * dd.dd_L[f2]) / (fr1 - fr2);
+    /* 窄巷伪距（m） */
+    const double P_nl = (fr1 * dd.dd_P[f1] + fr2 * dd.dd_P[f2]) / (fr1 + fr2);
+
+    if (n_wl) *n_wl = L_wl - P_nl / lam_wl;
+    return true;
+}
+
+bool buildDdEpochs(const std::vector<RinexEpoch> &rover,
+                   const std::vector<RinexEpoch> &base,
+                   const std::map<char, std::map<int, std::vector<KeplerEph>>> &eph,
+                   const DdBuildConfig &cfg,
+                   std::vector<DdEpochResult> &out,
+                   DdBuildStats *stats) {
+    out.clear();
+    DdBuildStats st_local;
+    if (stats) *stats = st_local;
+    if (rover.empty() || base.empty()) return false;
+    if (cfg.slots.empty() || cfg.slots.size() > MAX_FREQ) return false;
+
+    std::vector<std::array<int, 3>> slot_index;
+    buildObsRequests(cfg.slots, &slot_index);
+    const int n_slot = static_cast<int>(slot_index.size());
+
+    /* MW 周跳状态：按 (ref, sat, slot) 键维护最近若干历元的 N_WL（滑动窗口） */
+    struct MwState { std::vector<double> buf; };
+    std::map<std::pair<AmbKey, int>, MwState> mw_state;
+    int n_slip_total = 0;
+
+    std::vector<double> bt(base.size());
+    for (size_t i = 0; i < base.size(); ++i) bt[i] = base[i].t;
+    const bool bt_sorted = std::is_sorted(bt.begin(), bt.end());
+
+    const double elev_mask = cfg.elev_mask_deg * DEG;
+    const Eigen::Vector3d rover_ref = cfg.rover_approx;
+
+    /* ================= 第 1 遍：逐历元收集候选卫星 ================= */
+    struct EpochCands { double t; std::vector<Cand> cands; };
+    std::vector<EpochCands> ec;
+
+    for (const RinexEpoch &re : rover) {
+        ++st_local.n_epochs_rover;
+        if (re.flag != 0 && re.flag != 1) continue;
+
+        const RinexEpoch *be = nullptr;
+        if (bt_sorted) {
+            auto it = std::lower_bound(bt.begin(), bt.end(), re.t);
+            size_t idx = static_cast<size_t>(it - bt.begin());
+            if (idx > 0 && (idx >= base.size() ||
+                            std::fabs(bt[idx - 1] - re.t) <= std::fabs(bt[idx] - re.t)))
+                --idx;
+            if (idx < base.size() && std::fabs(bt[idx] - re.t) <= cfg.max_base_dt)
+                be = &base[idx];
+        }
+        if (!be) { ++st_local.n_no_base; continue; }
+
+        std::vector<Cand> cands;
+        for (const RinexSatObs &rs : re.sats) {
+            const RinexSatObs *bs = nullptr;
+            for (const RinexSatObs &b : be->sats) {
+                if (b.sys == rs.sys && b.prn == rs.prn) { bs = &b; break; }
+            }
+            if (!bs) continue;
+
+            bool all = true;
+            for (int s = 0; s < n_slot && all; ++s) {
+                const int iP = slot_index[static_cast<size_t>(s)][0];
+                const int iL = slot_index[static_cast<size_t>(s)][1];
+                if (iP >= 0 && (!rs.ok(iP) || !bs->ok(iP))) all = false;
+                if (iL >= 0 && (!rs.ok(iL) || !bs->ok(iL))) all = false;
+            }
+            if (!all) continue;
+
+            auto es = eph.find(rs.sys);
+            if (es == eph.end()) continue;
+            auto ep = es->second.find(rs.prn);
+            if (ep == es->second.end() || ep->second.empty()) continue;
+
+            const KeplerEph *best_e = nullptr;
+            double best_dt = 1e18;
+            for (const KeplerEph &cand : ep->second) {
+                const double d = std::fabs(cand.toe - re.t);
+                if (d < best_dt) { best_dt = d; best_e = &cand; }
+            }
+            if (!best_e) continue;
+
+            Cand cd;
+            cd.key = SatKey{rs.sys, rs.prn};
+            cd.rover = &rs;
+            cd.base = bs;
+            if (!satPosAtRx(*best_e, re.t, rover_ref, cd.pos, &cd.clk)) continue;
+
+            const Eigen::Vector3d los = cd.pos - rover_ref;
+            const double rng = los.norm();
+            if (rng < 1.0e6) continue;
+            const Eigen::Vector3d up = rover_ref.normalized();
+            cd.elev = std::asin(std::max(-1.0, std::min(1.0, los.dot(up) / rng)));
+            if (cd.elev < elev_mask) continue;
+
+            cands.push_back(cd);
+        }
+
+        if (static_cast<int>(cands.size()) < cfg.min_sats) { ++st_local.n_too_few; continue; }
+        ec.push_back(EpochCands{re.t, std::move(cands)});
+    }
+
+    /* ================= 选参考星（每系统一颗，全窗口固定） ================= */
+    std::map<char, int> chosen;                     /* 系统 → PRN */
+    if (cfg.stable_reference) {
+        std::map<std::pair<char, int>, int> cnt;    /* (系统,PRN) → 可用历元数 */
+        std::map<std::pair<char, int>, double> elev_sum;
+        for (const EpochCands &e : ec) {
+            for (const Cand &c : e.cands) {
+                ++cnt[{c.key.sys, c.key.prn}];
+                elev_sum[{c.key.sys, c.key.prn}] += c.elev;
+            }
+        }
+        for (const auto &kv : cnt) {
+            const char sys = kv.first.first;
+            const int  prn = kv.first.second;
+            auto it = chosen.find(sys);
+            if (it == chosen.end()) { chosen[sys] = prn; continue; }
+            const int cur = it->second;
+            const int c_new = cnt[{sys, prn}];
+            const int c_cur = cnt[{sys, cur}];
+            if (c_new > c_cur) { chosen[sys] = prn; continue; }
+            if (c_new == c_cur) {
+                const double e_new = elev_sum[{sys, prn}] / c_new;
+                const double e_cur = elev_sum[{sys, cur}] / c_cur;
+                if (e_new > e_cur) chosen[sys] = prn;
+            }
+        }
+    }
+
+    /* ================= 第 2 遍：按选定参考星组双差 ================= */
+    for (const EpochCands &e : ec) {
+        std::map<char, std::vector<const Cand *>> by_sys;
+        for (const Cand &c : e.cands) by_sys[c.key.sys].push_back(&c);
+
+        DdEpochResult res;
+        res.t = e.t;
+        res.n_common = static_cast<int>(e.cands.size());
+
+        for (auto &kv : by_sys) {
+            const std::vector<const Cand *> &g = kv.second;
+            if (g.size() < 2) continue;
+
+            size_t iref = static_cast<size_t>(-1);
+            if (cfg.stable_reference) {
+                auto it = chosen.find(kv.first);
+                if (it != chosen.end()) {
+                    for (size_t i = 0; i < g.size(); ++i) {
+                        if (g[i]->key.prn == it->second) { iref = i; break; }
+                    }
+                }
+                if (iref == static_cast<size_t>(-1)) {
+                    /* 选定参考星本历元不可用：不用别的星顶替（会引入新模糊度参数） */
+                    ++st_local.n_ref_missing;
+                    continue;
+                }
+            } else {
+                iref = 0;
+                for (size_t i = 1; i < g.size(); ++i)
+                    if (g[i]->elev > g[iref]->elev) iref = i;
+            }
+
+            const Cand &ref = *g[iref];
+            if (res.ref_prn == 0) res.ref_prn = ref.key.prn;
+            bool sys_used = false;
+
+            for (size_t i = 0; i < g.size(); ++i) {
+                if (i == iref) continue;
+                const Cand &s = *g[i];
+
+                DDObs dd;
+                dd.ref_sat = ref.key.prn;
+                dd.sat     = s.key.prn;
+                std::array<bool, MAX_FREQ> slip{};
+                slip.fill(false);
+
+                for (int sl = 0; sl < n_slot; ++sl) {
+                    const int iP = slot_index[static_cast<size_t>(sl)][0];
+                    const int iL = slot_index[static_cast<size_t>(sl)][1];
+                    const int iD = slot_index[static_cast<size_t>(sl)][2];
+
+                    if (iP >= 0) {
+                        dd.dd_P[sl] = (s.rover->val[static_cast<size_t>(iP)] -
+                                       ref.rover->val[static_cast<size_t>(iP)])
+                                    - (s.base ->val[static_cast<size_t>(iP)] -
+                                       ref.base ->val[static_cast<size_t>(iP)]);
+                        dd.has_P[sl] = true;
+                    }
+                    if (iL >= 0) {
+                        dd.dd_L[sl] = (s.rover->val[static_cast<size_t>(iL)] -
+                                       ref.rover->val[static_cast<size_t>(iL)])
+                                    - (s.base ->val[static_cast<size_t>(iL)] -
+                                       ref.base ->val[static_cast<size_t>(iL)]);
+                        dd.has_L[sl] = true;
+                    }
+                    if (iD >= 0 && s.rover->ok(iD) && ref.rover->ok(iD) &&
+                        s.base->ok(iD) && ref.base->ok(iD)) {
+                        dd.dd_D[sl] = (s.rover->val[static_cast<size_t>(iD)] -
+                                       ref.rover->val[static_cast<size_t>(iD)])
+                                    - (s.base ->val[static_cast<size_t>(iD)] -
+                                       ref.base ->val[static_cast<size_t>(iD)]);
+                        dd.has_D[sl] = true;
+                    }
+                    if (cfg.use_lli_slip) {
+                        const int idx = (iP >= 0) ? iP : iL;
+                        const int lli[4] = {s.rover->lli[static_cast<size_t>(idx)],
+                                            ref.rover->lli[static_cast<size_t>(idx)],
+                                            s.base ->lli[static_cast<size_t>(idx)],
+                                            ref.base ->lli[static_cast<size_t>(idx)]};
+                        for (int q = 0; q < 4; ++q) if (lli[q] & 0x1) slip[sl] = true;
+                    }
+                }
+
+                /* MW 周跳：几何无关 + 电离层无关。用**弧段均值**判偏差，
+                 * 而不是与上一历元相减 —— 后者的噪声（≈0.5 周）会把门限淹掉。 */
+                if (cfg.mw_slip_thresh > 0.0 && n_slot >= 2) {
+                    double mw = std::numeric_limits<double>::quiet_NaN();
+                    if (ddMelbourneWubbena(dd, 0, 1, &mw) && std::isfinite(mw)) {
+                        for (int sl = 0; sl < n_slot; ++sl) {
+                            const AmbKey base_key = ambKey(dd.ref_sat, dd.sat, sl);
+                            const auto key = std::make_pair(base_key, sl);
+                            auto it = mw_state.find(key);
+                            if (it == mw_state.end()) {
+                                MwState ns;
+                                ns.buf.push_back(mw);
+                                mw_state[key] = std::move(ns);
+                                continue;
+                            }
+                            MwState &stt = it->second;
+                            double mean = 0.0;
+                            for (double v : stt.buf) mean += v;
+                            mean /= static_cast<double>(stt.buf.size());
+                            if (static_cast<int>(stt.buf.size()) >= cfg.mw_min_samples &&
+                                std::fabs(mw - mean) > cfg.mw_slip_thresh) {
+                                slip[sl] = true;
+                                stt.buf.assign(1, mw);      /* 跳变后重新起窗 */
+                                continue;
+                            }
+                            stt.buf.push_back(mw);
+                            if (static_cast<int>(stt.buf.size()) > cfg.mw_window)
+                                stt.buf.erase(stt.buf.begin());
+                        }
+                    }
+                }
+                for (int sl = 0; sl < n_slot; ++sl) if (slip[sl]) ++n_slip_total;
+
+                dd.sigma_P = GPS_FREQ[0].sigma_P * std::sqrt(2.0);
+                dd.sigma_L = GPS_FREQ[0].sigma_L;
+
+                auto fillSat = [](SatState &stt, const Cand &c) {
+                    stt.sat_id     = c.key.prn;
+                    stt.pos_ecef   = c.pos;
+                    stt.clk_bias_s = c.clk;
+                    stt.elev_rad   = c.elev;
+                    stt.valid      = true;
+                };
+                fillSat(dd.sat_i, s);
+                fillSat(dd.sat_k, ref);
+
+                res.dd.push_back(dd);
+                res.slip.push_back(slip);
+                sys_used = true;
+            }
+            if (sys_used) ++res.n_sys;
+        }
+
+        if (res.dd.empty()) continue;
+        res.n_used = static_cast<int>(res.dd.size());
+        out.push_back(std::move(res));
+    }
+
+    st_local.n_epochs_out = static_cast<int>(out.size());
+    st_local.n_slip = n_slip_total;
+    st_local.chosen_ref = chosen;
+    if (stats) *stats = st_local;
+    return !out.empty();
+}
+
+/* ============================ 挂到 Frame ============================ */
+int attachDdToFrames(std::vector<Frame> &frames,
+                     const std::vector<DdEpochResult> &dd_epochs,
+                     double t_offset, double tol) {
+    if (frames.empty() || dd_epochs.empty()) return 0;
+
+    /* 为**全部**双差历元按 (ref_sat, sat, slot) 预计算弧段号。
+     * 关键点：必须在全历元序列上累计计数器，而不是在"匹配到的帧"上累计；
+     * 关键帧采样率通常低于 GNSS 采样率，逐帧累计会漏掉未匹配历元里的周跳，
+     * 从而把两条不同的弧串成同一个键。 */
+    std::vector<std::vector<std::array<int, MAX_FREQ>>> dd_arc_all(dd_epochs.size());
+    {
+        std::map<AmbKey, int> arc_of;
+        for (size_t e = 0; e < dd_epochs.size(); ++e) {
+            const DdEpochResult &ep = dd_epochs[e];
+            dd_arc_all[e].assign(ep.dd.size(), {0, 0, 0});
+            for (size_t i = 0; i < ep.dd.size(); ++i) {
+                for (int slot = 0; slot < MAX_FREQ; ++slot) {
+                    const AmbKey ak = ambKey(ep.dd[i].ref_sat, ep.dd[i].sat, slot);
+                    if (ep.slip[i][slot]) ++arc_of[ak];
+                    dd_arc_all[e][i][slot] = arc_of[ak];
+                }
+            }
+        }
+    }
+
+    std::vector<double> dt(dd_epochs.size());
+    for (size_t i = 0; i < dd_epochs.size(); ++i) dt[i] = dd_epochs[i].t;
+
+    int n_ok = 0;
+    for (Frame &f : frames) {
+        const double want = f.time + t_offset;
+        auto it = std::lower_bound(dt.begin(), dt.end(), want);
+        size_t idx = static_cast<size_t>(it - dt.begin());
+        if (idx > 0 && (idx >= dd_epochs.size() ||
+                        std::fabs(dt[idx - 1] - want) <= std::fabs(dt[idx] - want)))
+            --idx;
+        if (idx >= dd_epochs.size()) continue;
+        if (std::fabs(dt[idx] - want) > tol) continue;
+
+        f.dd_obs = dd_epochs[idx].dd;
+        f.dd_arc = dd_arc_all[idx];
+        f.has_gnss_raw = !f.dd_obs.empty();
+        if (f.has_gnss_raw) ++n_ok;
+    }
+    return n_ok;
+}
+

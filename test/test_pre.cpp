@@ -50,7 +50,7 @@ static PreintegrationParam makeParam(bool noisy = false) {
     return p;
 }
 
-static ImuMeas makeMeas(double dt, const vect3 &dtheta, const vect3 &dvel,
+static ImuMeas makeMeas(double dt, const Eigen::Vector3d &dtheta, const Eigen::Vector3d &dvel,
                         double odovel = 0.0) {
     ImuMeas m;
     m.dt      = dt;
@@ -78,10 +78,10 @@ static void test_zero_motion() {
 
     CHECK_NEAR(norm(preint.p()),  0.0, 1e-12, "Δp 保持零");
     CHECK_NEAR(norm(preint.v()),  0.0, 1e-12, "Δv 保持零");
-    CHECK_NEAR(std::fabs(preint.q().q0), 1.0, 1e-12, "Δq = I (w)");
-    CHECK_NEAR(preint.q().q1, 0.0, 1e-12, "Δq = I (x)");
-    CHECK_NEAR(preint.q().q2, 0.0, 1e-12, "Δq = I (y)");
-    CHECK_NEAR(preint.q().q3, 0.0, 1e-12, "Δq = I (z)");
+    CHECK_NEAR(std::fabs(preint.q().w()), 1.0, 1e-12, "Δq = I (w)");
+    CHECK_NEAR(preint.q().x(), 0.0, 1e-12, "Δq = I (x)");
+    CHECK_NEAR(preint.q().y(), 0.0, 1e-12, "Δq = I (y)");
+    CHECK_NEAR(preint.q().z(), 0.0, 1e-12, "Δq = I (z)");
     CHECK_NEAR(preint.dt(), dt * N, 1e-12, "累计时间");
     CHECK(preint.num() == N, "测量计数");
 }
@@ -101,15 +101,15 @@ static void test_constant_rotation() {
     const int    N       = 200;
     const double T       = dt * N;
 
-    const ImuMeas m = makeMeas(dt, vect3(0.0, 0.0, omega_z * dt), O31);
+    const ImuMeas m = makeMeas(dt, Eigen::Vector3d(0.0, 0.0, omega_z * dt), O31);
     for (int i = 0; i < N; ++i) preint.integration(m);
 
-    quat expect = rv2q(vect3(0.0, 0.0, omega_z * T));
+    Eigen::Quaterniond expect = rv2q(Eigen::Vector3d(0.0, 0.0, omega_z * T));
 
-    CHECK_NEAR(preint.q().q0, expect.q0, 1e-10, "匀速旋转 q0");
-    CHECK_NEAR(preint.q().q1, expect.q1, 1e-10, "匀速旋转 q1");
-    CHECK_NEAR(preint.q().q2, expect.q2, 1e-10, "匀速旋转 q2");
-    CHECK_NEAR(preint.q().q3, expect.q3, 1e-10, "匀速旋转 q3");
+    CHECK_NEAR(preint.q().w(), expect.w(), 1e-10, "匀速旋转 q0");
+    CHECK_NEAR(preint.q().x(), expect.x(), 1e-10, "匀速旋转 q1");
+    CHECK_NEAR(preint.q().y(), expect.y(), 1e-10, "匀速旋转 q2");
+    CHECK_NEAR(preint.q().z(), expect.z(), 1e-10, "匀速旋转 q3");
     CHECK_NEAR(norm(preint.v()), 0.0, 1e-12, "无加速度 → Δv = 0");
     CHECK_NEAR(norm(preint.p()), 0.0, 1e-12, "无加速度 → Δp = 0");
 }
@@ -130,15 +130,15 @@ static void test_constant_acceleration() {
     const int    N  = 100;
     const double T  = dt * N;
 
-    const ImuMeas m = makeMeas(dt, O31, vect3(a * dt, 0.0, 0.0));
+    const ImuMeas m = makeMeas(dt, O31, Eigen::Vector3d(a * dt, 0.0, 0.0));
     for (int i = 0; i < N; ++i) preint.integration(m);
 
-    CHECK_NEAR(preint.v().i, a * T,         1e-9, "Δv_x = a·T");
-    CHECK_NEAR(preint.v().j, 0.0,           1e-12, "Δv_y = 0");
-    CHECK_NEAR(preint.v().k, 0.0,           1e-12, "Δv_z = 0");
-    CHECK_NEAR(preint.p().i, 0.5 * a * T * T, 1e-9, "Δp_x = 0.5·a·T²");
-    CHECK_NEAR(preint.p().j, 0.0,           1e-12, "Δp_y = 0");
-    CHECK_NEAR(preint.p().k, 0.0,           1e-12, "Δp_z = 0");
+    CHECK_NEAR(preint.v().x(), a * T,         1e-9, "Δv_x = a·T");
+    CHECK_NEAR(preint.v().y(), 0.0,           1e-12, "Δv_y = 0");
+    CHECK_NEAR(preint.v().z(), 0.0,           1e-12, "Δv_z = 0");
+    CHECK_NEAR(preint.p().x(), 0.5 * a * T * T, 1e-9, "Δp_x = 0.5·a·T²");
+    CHECK_NEAR(preint.p().y(), 0.0,           1e-12, "Δp_y = 0");
+    CHECK_NEAR(preint.p().z(), 0.0,           1e-12, "Δp_z = 0");
 }
 
 /* ==========================================================================
@@ -161,8 +161,8 @@ static void test_rotation_with_acceleration_consistency() {
     std::uniform_real_distribution<double> u(-0.02, 0.02);
     for (int i = 0; i < N; ++i) {
         seq.push_back(makeMeas(dt,
-                               vect3(u(rng), u(rng), 0.5 + u(rng)),
-                               vect3(0.3 + u(rng), u(rng), -0.2 + u(rng))));
+                               Eigen::Vector3d(u(rng), u(rng), 0.5 + u(rng)),
+                               Eigen::Vector3d(0.3 + u(rng), u(rng), -0.2 + u(rng))));
     }
 
     /* 路径 A：直接 integration */
@@ -175,15 +175,15 @@ static void test_rotation_with_acceleration_consistency() {
     B.setBias(O31, O31);
     for (auto &m : seq) B.integration(m);
 
-    vect3 bg(1.0e-4, -2.0e-4, 3.0e-4);
-    vect3 ba(1.0e-3, -5.0e-4, 2.0e-3);
+    Eigen::Vector3d bg(1.0e-4, -2.0e-4, 3.0e-4);
+    Eigen::Vector3d ba(1.0e-3, -5.0e-4, 2.0e-3);
     A.setBias(bg, ba);
     B.setBias(bg, ba);
 
     CHECK_NEAR(norm(A.p() - B.p()), 0.0, 1e-12, "repropagation 位置一致");
     CHECK_NEAR(norm(A.v() - B.v()), 0.0, 1e-12, "repropagation 速度一致");
-    CHECK_NEAR(std::fabs(A.q().q0 - B.q().q0), 0.0, 1e-14, "repropagation 姿态一致 (w)");
-    CHECK_NEAR(std::fabs(A.q().q1 - B.q().q1), 0.0, 1e-14, "repropagation 姿态一致 (x)");
+    CHECK_NEAR(std::fabs(A.q().w() - B.q().w()), 0.0, 1e-14, "repropagation 姿态一致 (w)");
+    CHECK_NEAR(std::fabs(A.q().x() - B.q().x()), 0.0, 1e-14, "repropagation 姿态一致 (x)");
 }
 
 /* ==========================================================================
@@ -197,12 +197,12 @@ static void test_bias_correction() {
     const double dt = 0.01;
     const int    N  = 100;
     const double T  = dt * N;
-    const vect3  ba(0.1, -0.05, 0.02);
+    const Eigen::Vector3d  ba(0.1, -0.05, 0.02);
 
     Preintegration preint(makeParam(false));
     preint.setBias(O31, ba);
 
-    const ImuMeas m = makeMeas(dt, O31, vect3(0.1 * dt, -0.05 * dt, 0.02 * dt));
+    const ImuMeas m = makeMeas(dt, O31, Eigen::Vector3d(0.1 * dt, -0.05 * dt, 0.02 * dt));
     for (int i = 0; i < N; ++i) preint.integration(m);
 
     /* 去偏后加速度应为零 */
@@ -223,8 +223,8 @@ static void test_covariance_psd() {
     const double dt = 0.01;
     const int    N  = 200;
     const ImuMeas m = makeMeas(dt,
-                               vect3(1.0e-3, 2.0e-3, -1.0e-3),
-                               vect3(0.05, -0.02, 0.10));
+                               Eigen::Vector3d(1.0e-3, 2.0e-3, -1.0e-3),
+                               Eigen::Vector3d(0.05, -0.02, 0.10));
     for (int i = 0; i < N; ++i) preint.integration(m);
 
     const auto &cov = preint.cov();
@@ -260,13 +260,13 @@ static void test_long_run_numerical_stability() {
     const int    N  = 2000;
     const double T  = dt * N;
 
-    const ImuMeas m = makeMeas(dt, O31, vect3(0.0, 0.0, a * dt));
+    const ImuMeas m = makeMeas(dt, O31, Eigen::Vector3d(0.0, 0.0, a * dt));
     for (int i = 0; i < N; ++i) preint.integration(m);
 
     /* 沿 z 轴积分 */
-    CHECK_NEAR(preint.v().k, a * T,          1e-8, "长时积分 Δv 稳定");
-    CHECK_NEAR(preint.p().k, 0.5 * a * T * T, 1e-8, "长时积分 Δp 稳定");
-    CHECK_NEAR(std::fabs(preint.q().q0), 1.0, 1e-12, "长时积分 Δq 稳定 (w)");
+    CHECK_NEAR(preint.v().z(), a * T,          1e-8, "长时积分 Δv 稳定");
+    CHECK_NEAR(preint.p().z(), 0.5 * a * T * T, 1e-8, "长时积分 Δp 稳定");
+    CHECK_NEAR(std::fabs(preint.q().w()), 1.0, 1e-12, "长时积分 Δq 稳定 (w)");
 }
 
 /* ==========================================================================
@@ -280,8 +280,8 @@ static void test_covariance_monotonic_growth() {
 
     const double dt = 0.01;
     const ImuMeas m = makeMeas(dt,
-                               vect3(1.0e-3, 0.0, 0.0),
-                               vect3(0.0, 0.0, 9.8 * dt));
+                               Eigen::Vector3d(1.0e-3, 0.0, 0.0),
+                               Eigen::Vector3d(0.0, 0.0, 9.8 * dt));
 
     double trace_prev = 0.0;
     for (int k = 0; k < 100; ++k) {

@@ -42,6 +42,10 @@ endif()
 # 可执行程序
 # ---------------------------------------------------------------------------
 add_executable(ipos3_opt src/main.cpp)
+
+# GNSS 双差定位算例（独立小工具，不属于测试）
+add_executable(dd_report test/dd_report.cpp)
+target_link_libraries(dd_report PRIVATE ipos3_opt_lib)
 target_link_libraries(ipos3_opt PRIVATE ipos3_opt_lib)
 
 

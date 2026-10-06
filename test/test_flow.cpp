@@ -24,19 +24,19 @@
  * ==========================================================================*/
 struct TruthSample {
     double t;
-    vect3  p;
-    quat   q;
-    vect3  v;
-    vect3  bg;
-    vect3  ba;
+    Eigen::Vector3d  p;
+    Eigen::Quaterniond   q;
+    Eigen::Vector3d  v;
+    Eigen::Vector3d  bg;
+    Eigen::Vector3d  ba;
 };
 
 struct SimConfig {
     double dt_imu        = 0.005;   /*< IMU 采样周期 200Hz  */
     int    N_imu_per_kf  = 200;     /*< 每关键帧 1s          */
     int    N_kf          = 5;       /*< 关键帧数             */
-    vect3  v0            = vect3(1.0, 0.5, 0.0);  /*< 真值速度 */
-    vect3  g_n           = vect3(0.0, 0.0, -9.8);
+    Eigen::Vector3d  v0            = Eigen::Vector3d(1.0, 0.5, 0.0);  /*< 真值速度 */
+    Eigen::Vector3d  g_n           = Eigen::Vector3d(0.0, 0.0, -9.8);
     double sigma_imu     = 0.0;     /*< IMU 噪声（每步）     */
     double sigma_gnss    = 0.0;     /*< GNSS 位置噪声        */
 };
@@ -66,7 +66,7 @@ SimData simulate(const SimConfig &cfg, unsigned seed = 20240918u) {
     /* 恒定姿态、匀速运动：
      *   比力 f_body = R^T (a_n - g_n) = R^T (-g_n)
      *   R = I 时 f_body = -g_n = [0, 0, +9.8]            */
-    const vect3 f_body = -cfg.g_n;
+    const Eigen::Vector3d f_body = -cfg.g_n;
 
     std::mt19937 rng(seed);
     std::normal_distribution<double> nd_imu (0.0, cfg.sigma_imu);
@@ -79,18 +79,18 @@ SimData simulate(const SimConfig &cfg, unsigned seed = 20240918u) {
         f.time = out.truth[k].t;
 
         /* 初值：位置给真值（视作无先验），速度/零偏给 0 */
-        f.pose = { out.truth[k].p.i, out.truth[k].p.j, out.truth[k].p.k,
-                   out.truth[k].q.q1, out.truth[k].q.q2,
-                   out.truth[k].q.q3, out.truth[k].q.q0 };
+        f.pose = { out.truth[k].p.x(), out.truth[k].p.y(), out.truth[k].p.z(),
+                   out.truth[k].q.x(), out.truth[k].q.y(),
+                   out.truth[k].q.z(), out.truth[k].q.w() };
         f.mix  = { 0, 0, 0,   0, 0, 0,   0, 0, 0,   0 };
 
         /* GNSS 位置观测（带噪） */
         f.has_gnss  = true;
-        vect3 noise(nd_gnss(rng) * cfg.sigma_gnss,
+        Eigen::Vector3d noise(nd_gnss(rng) * cfg.sigma_gnss,
                     nd_gnss(rng) * cfg.sigma_gnss,
                     nd_gnss(rng) * cfg.sigma_gnss);
         f.gnss_pos  = out.truth[k].p + noise;
-        f.gnss_std  = vect3(0.5, 0.5, 1.0);   /* 观测标准差 */
+        f.gnss_std  = Eigen::Vector3d(0.5, 0.5, 1.0);   /* 观测标准差 */
 
         /* 预积分器（末帧无 pre_to_next） */
         if (k + 1 < cfg.N_kf) {
@@ -116,8 +116,8 @@ SimData simulate(const SimConfig &cfg, unsigned seed = 20240918u) {
             m.dvel   = f_body * cfg.dt_imu;
 
             if (cfg.sigma_imu > 0.0) {
-                m.dtheta += vect3(nd_imu(rng), nd_imu(rng), nd_imu(rng));
-                m.dvel   += vect3(nd_imu(rng), nd_imu(rng), nd_imu(rng));
+                m.dtheta += Eigen::Vector3d(nd_imu(rng), nd_imu(rng), nd_imu(rng));
+                m.dvel   += Eigen::Vector3d(nd_imu(rng), nd_imu(rng), nd_imu(rng));
             }
             preint.integration(m);
         }
@@ -133,7 +133,7 @@ struct SolveResult {
     std::vector<TruthSample> est;    /*< 估计状态（从 frames 提取） */
 };
 
-SolveResult optimize(std::vector<Frame> &frames, const vect3 &g_n) {
+SolveResult optimize(std::vector<Frame> &frames, const Eigen::Vector3d &g_n) {
     ceres::Problem problem;
 
     /* ---- 参数块 ---- */
@@ -192,12 +192,12 @@ SolveResult optimize(std::vector<Frame> &frames, const vect3 &g_n) {
     res.est.resize(frames.size());
     for (size_t k = 0; k < frames.size(); ++k) {
         res.est[k].t  = frames[k].time;
-        res.est[k].p  = vect3(frames[k].pose[0], frames[k].pose[1], frames[k].pose[2]);
-        res.est[k].q  = quat(frames[k].pose[6], frames[k].pose[3],
+        res.est[k].p  = Eigen::Vector3d(frames[k].pose[0], frames[k].pose[1], frames[k].pose[2]);
+        res.est[k].q  = Eigen::Quaterniond(frames[k].pose[6], frames[k].pose[3],
                              frames[k].pose[4], frames[k].pose[5]);
-        res.est[k].v  = vect3(frames[k].mix[0], frames[k].mix[1], frames[k].mix[2]);
-        res.est[k].bg = vect3(frames[k].mix[3], frames[k].mix[4], frames[k].mix[5]);
-        res.est[k].ba = vect3(frames[k].mix[6], frames[k].mix[7], frames[k].mix[8]);
+        res.est[k].v  = Eigen::Vector3d(frames[k].mix[0], frames[k].mix[1], frames[k].mix[2]);
+        res.est[k].bg = Eigen::Vector3d(frames[k].mix[3], frames[k].mix[4], frames[k].mix[5]);
+        res.est[k].ba = Eigen::Vector3d(frames[k].mix[6], frames[k].mix[7], frames[k].mix[8]);
     }
     return res;
 }
@@ -226,7 +226,7 @@ EvalStats evaluate(const SimData &sim, const SolveResult &sol) {
         s.max_bg_err = std::max(s.max_bg_err, norm(E.bg - T.bg));
         s.max_ba_err = std::max(s.max_ba_err, norm(E.ba - T.ba));
 
-        vect3 dphi = q2rv((~T.q) * E.q);
+        Eigen::Vector3d dphi = q2rv(((T.q.conjugate())) * E.q);
         s.max_q_err = std::max(s.max_q_err, norm(dphi));
     }
     return s;
@@ -248,7 +248,7 @@ static void test_static_scene() {
 
     SimConfig cfg;
     cfg.N_kf       = 5;
-    cfg.v0         = vect3(0.0, 0.0, 0.0);   /* 静止 */
+    cfg.v0         = Eigen::Vector3d(0.0, 0.0, 0.0);   /* 静止 */
     cfg.sigma_imu  = 0.0;
     cfg.sigma_gnss = 0.0;
 
@@ -271,7 +271,7 @@ static void test_uniform_motion_noiseless() {
     std::printf("\n===== T2: 匀速直线（无噪声） =====\n");
 
     SimConfig cfg;
-    cfg.v0         = vect3(1.0, 0.5, 0.0);
+    cfg.v0         = Eigen::Vector3d(1.0, 0.5, 0.0);
     cfg.sigma_imu  = 0.0;
     cfg.sigma_gnss = 0.0;
 
@@ -284,8 +284,8 @@ static void test_uniform_motion_noiseless() {
 
     for (size_t k = 0; k < sol.est.size(); ++k) {
         std::printf("  k=%zu  p_est=(%8.4f,%8.4f,%8.4f)  v_est=(%8.4f,%8.4f,%8.4f)\n",
-                    k, sol.est[k].p.i, sol.est[k].p.j, sol.est[k].p.k,
-                       sol.est[k].v.i, sol.est[k].v.j, sol.est[k].v.k);
+                    k, sol.est[k].p.x(), sol.est[k].p.y(), sol.est[k].p.z(),
+                       sol.est[k].v.x(), sol.est[k].v.y(), sol.est[k].v.z());
     }
 
     check(sol.summary.termination_type == ceres::CONVERGENCE, "Ceres 收敛");
@@ -298,7 +298,7 @@ static void test_noisy_scene() {
     std::printf("\n===== T3: 匀速直线（含噪声） =====\n");
 
     SimConfig cfg;
-    cfg.v0         = vect3(1.0, 0.5, 0.0);
+    cfg.v0         = Eigen::Vector3d(1.0, 0.5, 0.0);
     cfg.sigma_imu  = 1.0e-3;   /* 每步 IMU 噪声 */
     cfg.sigma_gnss = 0.5;      /* GNSS 位置噪声 */
 
@@ -311,8 +311,8 @@ static void test_noisy_scene() {
 
     for (size_t k = 0; k < sol.est.size(); ++k) {
         std::printf("  k=%zu  p_est=(%8.4f,%8.4f,%8.4f)  v_est=(%8.4f,%8.4f,%8.4f)\n",
-                    k, sol.est[k].p.i, sol.est[k].p.j, sol.est[k].p.k,
-                       sol.est[k].v.i, sol.est[k].v.j, sol.est[k].v.k);
+                    k, sol.est[k].p.x(), sol.est[k].p.y(), sol.est[k].p.z(),
+                       sol.est[k].v.x(), sol.est[k].v.y(), sol.est[k].v.z());
     }
 
     check(sol.summary.termination_type == ceres::CONVERGENCE, "Ceres 收敛");
@@ -327,7 +327,7 @@ static void test_gnss_anchor_recovery() {
     /* 情景：初值 p 全部设为 0，看 GNSS 因子能否把位置拉回真值 */
 
     SimConfig cfg;
-    cfg.v0         = vect3(1.0, 0.0, 0.0);
+    cfg.v0         = Eigen::Vector3d(1.0, 0.0, 0.0);
     cfg.sigma_imu  = 0.0;
     cfg.sigma_gnss = 0.0;
 
@@ -354,7 +354,7 @@ static void test_attitude_perturbation() {
      * 使相邻预积分的相对姿态不一致，从而可观测 */
 
     SimConfig cfg;
-    cfg.v0         = vect3(1.0, 0.5, 0.0);
+    cfg.v0         = Eigen::Vector3d(1.0, 0.5, 0.0);
     cfg.sigma_imu  = 0.0;
     cfg.sigma_gnss = 0.0;
 
@@ -362,16 +362,16 @@ static void test_attitude_perturbation() {
 
     /* 只破坏中间帧姿态：绕 z 轴偏 10° */
     const size_t k_bad = sim.frames.size() / 2;   // k = 2
-    quat q_bias = rv2q(vect3(0.0, 0.0, 10.0 * DEG));
+    Eigen::Quaterniond q_bias = rv2q(Eigen::Vector3d(0.0, 0.0, 10.0 * DEG));
     {
         auto &f = sim.frames[k_bad];
-        quat q(f.pose[6], f.pose[3], f.pose[4], f.pose[5]);
-        quat q_new = q * q_bias;
-        normlize(&q_new);
-        f.pose[3] = q_new.q1;
-        f.pose[4] = q_new.q2;
-        f.pose[5] = q_new.q3;
-        f.pose[6] = q_new.q0;
+        Eigen::Quaterniond q(f.pose[6], f.pose[3], f.pose[4], f.pose[5]);
+        Eigen::Quaterniond q_new = q * q_bias;
+        normlize(q_new);
+        f.pose[3] = q_new.x();
+        f.pose[4] = q_new.y();
+        f.pose[5] = q_new.z();
+        f.pose[6] = q_new.w();
     }
 
     SolveResult sol = optimize(sim.frames, cfg.g_n);
@@ -392,17 +392,17 @@ static void test_acc_bias_observable() {
      * 优化应能从轨迹中恢复 ba */
 
     SimConfig cfg;
-    cfg.v0         = vect3(1.0, 0.0, 0.0);
+    cfg.v0         = Eigen::Vector3d(1.0, 0.0, 0.0);
     cfg.sigma_imu  = 0.0;
     cfg.sigma_gnss = 0.0;
-    const vect3 ba_true(0.0, 0.0, 0.05);
+    const Eigen::Vector3d ba_true(0.0, 0.0, 0.05);
 
     SimData sim = simulate(cfg);
     /* 重放 IMU：把 ba 叠加进 dvel */
     for (int k = 0; k + 1 < cfg.N_kf; ++k) {
         sim.frames[k].pre_to_next = std::make_shared<Preintegration>();
         sim.frames[k].pre_to_next->setBias(O31, O31);
-        const vect3 f_body = -cfg.g_n;   /* [0,0,+9.8] */
+        const Eigen::Vector3d f_body = -cfg.g_n;   /* [0,0,+9.8] */
         for (int i = 0; i < cfg.N_imu_per_kf; ++i) {
             ImuMeas m;
             m.dt     = cfg.dt_imu;
@@ -453,7 +453,7 @@ static void test_long_trajectory() {
 
     SimConfig cfg;
     cfg.N_kf        = 50;         /* 5 帧 → 50 帧 */
-    cfg.v0          = vect3(1.0, 0.5, 0.0);
+    cfg.v0          = Eigen::Vector3d(1.0, 0.5, 0.0);
     cfg.sigma_imu   = 0.0;
     cfg.sigma_gnss  = 0.0;
 

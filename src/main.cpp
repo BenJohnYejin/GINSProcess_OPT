@@ -165,14 +165,14 @@ int main(int argc, char *argv[]) {
                     opt.calib_init.sodo            = v[0];
                     opt.calib_init.abv_pitch       = v[1] * DEG;
                     opt.calib_init.abv_yaw         = v[2] * DEG;
-                    opt.calib_init.lvOD            = vect3(v[3], v[4], v[5]);
+                    opt.calib_init.lvOD            = Eigen::Vector3d(v[3], v[4], v[5]);
                     opt.calib_init.yaw_gnss_offset = v[6] * DEG;
                     if (n == 14) {
-                        opt.calib_init.t_bc = vect3(v[7], v[8], v[9]);
+                        opt.calib_init.t_bc = Eigen::Vector3d(v[7], v[8], v[9]);
                         /* 四元数输入顺序 qx,qy,qz,qw，构造时 quat(w,x,y,z) */
-                        opt.calib_init.q_bc = quat(v[13], v[10], v[11], v[12]);
+                        opt.calib_init.q_bc = Eigen::Quaterniond(v[13], v[10], v[11], v[12]);
                         /* 归一化，防止用户输入未归一化的四元数 */
-                        normlize(&opt.calib_init.q_bc);
+                        normlize(opt.calib_init.q_bc);
                     }
                 } else {
                     std::fprintf(stderr, "--calib-init 需要 7 或 14 项，收到 %d 项\n", n);
@@ -224,7 +224,7 @@ int main(int argc, char *argv[]) {
             else if (key == "--base-pos") {
                 double x = 0, y = 0, z = 0;
                 if (std::sscanf(val.c_str(), "%lf,%lf,%lf", &x, &y, &z) == 3) {
-                    opt.base_pos_ecef = vect3(x, y, z);
+                    opt.base_pos_ecef = Eigen::Vector3d(x, y, z);
                 }
             }
         }
@@ -273,13 +273,13 @@ int main(int argc, char *argv[]) {
     std::printf("  安装角 pitch    : %+10.4f deg\n", c.abv_pitch / DEG);
     std::printf("  安装角 yaw      : %+10.4f deg\n", c.abv_yaw   / DEG);
     std::printf("  杆臂   lvOD     : (%+8.4f, %+8.4f, %+8.4f) m\n",
-                c.lvOD.i, c.lvOD.j, c.lvOD.k);
+                c.lvOD.x(), c.lvOD.y(), c.lvOD.z());
     std::printf("  航向偏置        : %+10.4f deg\n", c.yaw_gnss_offset / DEG);
     std::printf("  相机外参 t_bc   : (%+8.4f, %+8.4f, %+8.4f) m\n",
-                c.t_bc.i, c.t_bc.j, c.t_bc.k);
-    vect3 att = q2att(c.q_bc);
+                c.t_bc.x(), c.t_bc.y(), c.t_bc.z());
+    Eigen::Vector3d att = q2att(c.q_bc);
     std::printf("  相机外参 q_bc   : pitch=%+7.3f° roll=%+7.3f° yaw=%+7.3f°\n",
-                att.i / DEG, att.j / DEG, att.k / DEG);
+                att.x() / DEG, att.y() / DEG, att.z() / DEG);
 }
 
     return 0;

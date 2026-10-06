@@ -7,7 +7,8 @@
  *
  * 分节（与 alg_lib.cpp 的实现顺序一一对应）：
  *   0. 基础常量 ................ app_interface.h
- *   1. 基础类型 ................ vect3 / mat3 / quat / vect / mat
+ *   1. 基础类型 ................ Vector3d / Matrix3d / Quaterniond（后续迁移）
+           *                              动态向量/矩阵已统一为 Eigen
  *   2. 标量 & 矢量工具 .......... range / diffYaw / norm / askew ...
  *   3. 姿态与旋转 .............. a2qua / rv2q / q2mat / m2att ...
  *   4. 线性代数 ................ inv / llt_L / llt_sqrtinv / pinv_sym
@@ -30,6 +31,7 @@
 
 #include <array>
 #include <algorithm>
+#include <set>
 #include <random>
 #include <cstdarg>
 #include <cstdio>
@@ -47,6 +49,11 @@
 #include <Eigen/Geometry>
 #include <Eigen/Eigenvalues>
 #include <ceres/ceres.h>
+#include <string>
+#include <cctype>
+#include <fstream>
+#include <limits>
+#include <Eigen/Dense>
 
 #include <filesystem>                              // std::filesystem
 #include <opencv2/core.hpp>                        // cv::Mat / Point2f / TermCriteria / Scalar
@@ -123,7 +130,9 @@ constexpr double BETA_IF  = -GPS_FREQ[1].freq_hz * GPS_FREQ[1].freq_hz
 /* 参数块维数 ---------------------------------------------------------------------*/
 constexpr int NUM_POSE      = 7;  /*< p(3) + q(4) */
 constexpr int NUM_MIX       = 9;  /*< v(3) + bg(3) + ba(3) */
-constexpr int NUM_MIX_ODO   = 10; /*< 再加上里程计比例因子误差 sodo */
+/* mix 参数块 = {v, bg, ba}。里程计刻度因子误差由 calib[0] 估计（见 OdoVelResidual），
+ * 原先这里多放了一维 sodo，但没有任何残差读它 → 每帧一条恒零列、结构性秩亏，故退回 9 维。 */
+constexpr int NUM_MIX_ODO   = 9;
 constexpr int NUM_STATE     = 15; /*< 预积分残差维数 */
 constexpr int NUM_STATE_ODO = 19; /*< 再加上里程位移(3) 与比例因子(1) */
 constexpr int NUM_NOISE     = 12; /*< IMU 噪声维数 */
@@ -169,416 +178,223 @@ enum AntMode {
 #define CC180C360(yaw)  ( (yaw)>0.0 ? (_2PI-(yaw)) : -(yaw) )   // counter-clockwise +-180deg -> clockwise 0~360deg for yaw
 #define C360CC180(yaw)  ( (yaw)>=PI ? (_2PI-(yaw)) : -(yaw) )   // clockwise 0~360deg -> counter-clockwise +-180deg for yaw
 
-class mat3;
-class quat;
-class mat;   
-class vect; 
-class vect3;
 class earth;
 class Preintegration;
 
 /* ---------- 常用常量（定义在 ipos_fixed.cpp） ---------- */
-extern vect3 O31;   /*< 零矢量 */
-extern vect3 One31; /*< 全 1 矢量 */
-extern mat3 I33;    /*< 单位阵 */
-extern quat qI;     /*< 单位四元数 */
+/* 常用常量：直接是 Eigen 对象（C++17 inline 变量） */
+inline const Eigen::Vector3d    O31   = Eigen::Vector3d::Zero();
+inline const Eigen::Vector3d    One31 = Eigen::Vector3d::Ones();
+inline const Eigen::Matrix3d    I33   = Eigen::Matrix3d::Identity();
+inline const Eigen::Quaterniond qI    = Eigen::Quaterniond::Identity();
 
-mat3 Rot(double angle, char axis);
-mat3 rcijk(const mat3 &m, int ijk);
-void normlize(quat *q);
-
-class vect3 {
-public:
-    double i, j, k;
-
-    vect3(void) : i(0.0), j(0.0), k(0.0) {}
-    vect3(double xyz) : i(xyz), j(xyz), k(xyz) {}
-    vect3(double xx, double yy, double zz) : i(xx), j(yy), k(zz) {}
-    explicit vect3(const double *pdata) : i(pdata[0]), j(pdata[1]), k(pdata[2]) {}
-    explicit vect3(const float *pdata) : i(pdata[0]), j(pdata[1]), k(pdata[2]) {}
-    vect3(const Eigen::Vector3d &v) : i(v(0)), j(v(1)), k(v(2)) {}
-
-    /* ---------- Eigen 互操作 ---------- */
-    Eigen::Map<Eigen::Vector3d> e(void) { return Eigen::Map<Eigen::Vector3d>(&i); }
-    Eigen::Map<const Eigen::Vector3d> e(void) const { return Eigen::Map<const Eigen::Vector3d>(&i); }
-    Eigen::Vector3d toEigen(void) const { return Eigen::Vector3d(i, j, k); }
-
-    /* ---------- 与原版一致的成员查询 ---------- */
-    int IsZeros(const vect3 &v, double eps = EPS) const;
-    bool IsZeroXY(const vect3 &v, double eps = EPS) const;
-    bool IsNaN(const vect3 &v) const;
-
-    /* ---------- 运算 ---------- */
-    vect3 &operator=(double f);
-    vect3 &operator=(const double *pf);
-
-    vect3 operator+(const vect3 &v) const;
-    vect3 operator-(const vect3 &v) const;
-    vect3 operator*(const vect3 &v) const; /*< 叉乘 */
-    vect3 operator*(const mat &m) const;   /*< 行向量 × 矩阵 */
-    vect3 operator*(double f) const;
-    vect3 operator*(const mat3 &m) const; /*< 行向量 × 矩阵 */
-    vect3 operator/(double f) const;
-    vect3 operator/(const vect3 &v) const;
-
-    vect3 &operator+=(const vect3 &v);
-    vect3 &operator-=(const vect3 &v);
-    vect3 &operator*=(double f);
-    vect3 &operator/=(double f);
-    vect3 &operator/=(const vect3 &v);
-
-    friend vect3 operator*(double f, const vect3 &v);
-    friend vect3 operator-(const vect3 &v);
-};
+Eigen::Matrix3d Rot(double angle, char axis);
+Eigen::Matrix3d rcijk(const Eigen::Matrix3d &m, int ijk);
+void normlize(Eigen::Quaterniond &q);
 
 /* ============================================================================
- * mat3
- * ==========================================================================*/
-class mat3 {
-public:
-    double e00, e01, e02, e10, e11, e12, e20, e21, e22;
-
-    mat3(void) { set(0, 0, 0, 0, 0, 0, 0, 0, 0); }
-    mat3(double xyz) { set(xyz, xyz, xyz, xyz, xyz, xyz, xyz, xyz, xyz); }
-    explicit mat3(const double *pxyz);
-    explicit mat3(const float *pxyz);
-    mat3(double xx, double yy, double zz) { set(xx, 0, 0, 0, yy, 0, 0, 0, zz); }
-    mat3(double xx, double xy, double xz, double yx, double yy, double yz, double zx, double zy,
-         double zz) {
-        set(xx, xy, xz, yx, yy, yz, zx, zy, zz);
-    }
-    mat3(const vect3 &v0, const vect3 &v1, const vect3 &v2, bool isrow = 1);
-    mat3(const Eigen::Matrix3d &m);
-
-    void set(double xx, double xy, double xz, double yx, double yy, double yz, double zx, double zy,
-             double zz) {
-        e00 = xx; e01 = xy; e02 = xz;
-        e10 = yx; e11 = yy; e12 = yz;
-        e20 = zx; e21 = zy; e22 = zz;
-    }
-
-    double &operator()(int i, int j = -1);
-    double operator()(int i, int j = -1) const;
-
-    /* ---------- Eigen 互操作 ---------- */
-    Eigen::Map<Eigen::Matrix<double, 3, 3, Eigen::RowMajor>> e(void) {
-        return Eigen::Map<Eigen::Matrix<double, 3, 3, Eigen::RowMajor>>(&e00);
-    }
-    Eigen::Map<const Eigen::Matrix<double, 3, 3, Eigen::RowMajor>> e(void) const {
-        return Eigen::Map<const Eigen::Matrix<double, 3, 3, Eigen::RowMajor>>(&e00);
-    }
-    Eigen::Matrix3d toEigen(void) const { return e(); }
-
-    /* ---------- 运算 ---------- */
-    mat3 operator+(const mat3 &m) const;
-    mat3 operator-(const mat3 &m) const;
-    mat3 operator*(const mat3 &m) const;
-    mat3 operator*(double f) const;
-    vect3 operator*(const vect3 &v) const;
-    mat3 &operator+=(const mat3 &m);
-    mat3 operator+(const vect3 &v) const; /*< 矢量加到对角线 */
-    mat3 &operator+=(const vect3 &v);
-
-    void SetRow(int i, const vect3 &v);
-    void SetClm(int i, const vect3 &v);
-    vect3 GetRow(int i) const;
-    vect3 GetClm(int i) const;
-
-    mat3 Rot(double angle, char axis) { return ::Rot(angle, axis); }
-    mat3 rcijk(const mat3 &m, int ijk) { return ::rcijk(m, ijk); }
-
-    friend mat3 operator-(const mat3 &m);
-    friend mat3 operator~(const mat3 &m);
-    friend mat3 operator*(double f, const mat3 &m);
-};
-
-/* ============================================================================
- * quat  (q0 = w, q1..q3 = x,y,z)
- * ==========================================================================*/
-class quat {
-public:
-    double q0, q1, q2, q3;
-
-    quat(void) : q0(0.0), q1(0.0), q2(0.0), q3(0.0) {}
-    quat(double qq0, double qq1 = 0.0, double qq2 = 0.0, double qq3 = 0.0)
-        : q0(qq0), q1(qq1), q2(qq2), q3(qq3) {}
-    quat(double qq0, const vect3 &qqv) : q0(qq0), q1(qqv.i), q2(qqv.j), q3(qqv.k) {}
-    quat(const double *pdata) : q0(pdata[0]), q1(pdata[1]), q2(pdata[2]), q3(pdata[3]) {}
-    quat(const Eigen::Quaterniond &q) : q0(q.w()), q1(q.x()), q2(q.y()), q3(q.z()) {}
-
-    /* ---------- Eigen 互操作 ---------- */
-    Eigen::Quaterniond toEigen(void) const { return Eigen::Quaterniond(q0, q1, q2, q3); }
-
-    /* ---------- 运算 ---------- */
-    quat operator+(const vect3 &phi) const;
-    quat operator-(const vect3 &phi) const;
-    vect3 operator-(const quat &quat) const; /*< 失准角 */
-    quat operator*(const quat &q) const;
-    vect3 operator*(const vect3 &v) const; /*< 旋转矢量 */
-    quat &operator*=(const quat &q);
-    quat &operator-=(const vect3 &phi);
-
-    void SetYaw(double yaw = 0.0);
-    void normlize(quat *q) { ::normlize(q); }
-
-    friend quat operator~(const quat &q);
-};
-
-/* ============================================================================
- * vect
- * ==========================================================================*/
-class vect {
-public:
-    int row, clm, rc; /*< 与原版一致的形状描述：clm==1 时为列向量，否则为行向量 */
-    RowMajorMatrix E; /*< 实际存储（行主序），尺寸为 row×clm */
-    double *dd;       /*< == E.data()，供 `dd[i]` 风格的既有代码使用 */
-
-    vect(void);
-    vect(int row0, int clm0 = 1);
-    vect(int row0, double f);
-    vect(int row0, double f, double f1, ...);
-    vect(int row0, const double *pf);
-    vect(const vect3 &v);
-    vect(const vect3 &v1, const vect3 v2);
-    vect(const Eigen::VectorXd &v);
-
-    vect(const vect &o);
-    vect &operator=(const vect &o);
-
-    /* ---------- Eigen 互操作 ---------- */
-    Eigen::Map<const RowMajorMatrix> e(void) const {
-        return Eigen::Map<const RowMajorMatrix>(dd, row, clm);
-    }
-    Eigen::Map<RowMajorMatrix> e(void) { return Eigen::Map<RowMajorMatrix>(dd, row, clm); }
-    Eigen::VectorXd toEigen(void) const { return Eigen::Map<const Eigen::VectorXd>(dd, rc); }
-    int size(void) const { return rc; }
-
-    /* ---------- 与原版一致的成员函数 ---------- */
-    void Set(double f[], int size);
-    void Set2(double f[], int size);
-    void SetVect3(int i, const vect3 &v);
-    void Set2Vect3(int i, const vect3 &v);
-    void SetBit(unsigned int bit, double f);
-    void SetBit(unsigned int bit, const vect3 &v);
-    vect3 GetVect3(int i) const;
-
-    vect operator+(const vect &v) const;
-    vect operator-(const vect &v) const;
-    vect operator*(double f) const;
-    vect &operator=(double f);
-    vect &operator=(const double *pf);
-    vect &operator=(const mat3 &m);
-    vect &operator+=(const vect &v);
-    vect &operator-=(const vect &v);
-    vect &operator*=(double f);
-    mat operator*(const vect &v) const; /*< 外积 */
-    double &operator()(int r) { return dd[r]; }
-
-    friend vect operator~(const vect &v);
-
-private:
-    void resize(int r, int c);
-    void bind(void) { dd = E.data(); }
-};
-
-/* ============================================================================
- * mat
- * ==========================================================================*/
-class mat {
-public:
-    int row, clm, rc;
-    RowMajorMatrix E;
-    double *dd;
-
-    mat(void);
-    mat(int row0, int clm0);
-    mat(int row0, int clm0, double f);
-    mat(int row0, int clm0, double f, double f1, ...);
-    mat(int row0, int clm0, const double *pf);
-    mat(const Eigen::MatrixXd &m);
-
-    mat(const mat &o);
-    mat &operator=(const mat &o);
-
-    /* ---------- Eigen 互操作 ---------- */
-    Eigen::Map<const RowMajorMatrix> e(void) const {
-        return Eigen::Map<const RowMajorMatrix>(dd, row, clm);
-    }
-    Eigen::Map<RowMajorMatrix> e(void) { return Eigen::Map<RowMajorMatrix>(dd, row, clm); }
-    Eigen::MatrixXd toEigen(void) const { return e(); }
-    int size(void) const { return rc; }
-
-    /* ---------- 与原版一致的成员函数 ---------- */
-    void Clear(void);
-    void SetDiag(double f[], int len);
-    void SetDiag2(double f[], int len);
-
-    mat operator+(const mat &m) const;
-    mat operator-(const mat &m) const;
-    mat operator*(double f) const;
-    vect operator*(const vect &v) const;
-    mat operator*(const mat &m) const;
-    mat &operator=(double f);
-    mat &operator+=(const mat &m0);
-    mat &operator+=(const vect &v);
-    mat &operator-=(const mat &m0);
-    mat &operator*=(double f);
-    mat &operator++();
-    double &operator()(int r, int c = -1) { return dd[r * clm + (c < 0 ? r : c)]; }
-    /*< 只读访问（const 版本，Eigen 化之后补上的便利接口） */
-    double operator()(int r, int c = -1) const { return dd[r * clm + (c < 0 ? r : c)]; }
-
-    void ZeroRow(int i);
-    void ZeroClm(int j);
-    void SetRow(int i, double f, ...);
-    void SetRow(int i, const vect &v);
-    void SetClm(int j, double f[], int len);
-    void SetClm(int j, const vect &v);
-    vect GetRow(int i) const;
-    void GetRow(vect &v, int i);
-    vect GetClm(int j) const;
-    void GetClm(vect &v, int j);
-
-    void SetRowVect3(int i, int j, const vect3 &v);
-    void SetRowVect3(int i, int j, const vect3 &v, const vect3 &v1);
-    void SetRowVect3(int i, int j, const vect3 &v, const vect3 &v1, const vect3 &v2);
-    void SetClmVect3(int i, int j, const vect3 &v);
-    void SetClmVect3(int i, int j, const vect3 &v, const vect3 &v1);
-    void SetClmVect3(int i, int j, const vect3 &v, const vect3 &v1, const vect3 &v2);
-    vect3 GetRowVect3(int i, int j) const;
-    vect3 GetClmVect3(int i, int j) const;
-    void SetDiagVect3(int i, int j, const vect3 &v);
-    vect3 GetDiagVect3(int i, int j = -1) const;
-    void SetAskew(int i, int j, const vect3 &v);
-    void SetMat3(int i, int j, const mat3 &m);
-    void SetMat3(int i, int j, const mat3 &m, const mat3 &m1);
-    void SetMat3(int i, int j, const mat3 &m, const mat3 &m1, const mat3 &m2);
-    mat3 GetMat3(int i, int j = -1) const;
-    void SubAddMat3(int i, int j, const mat3 &m);
-
-    friend mat operator~(const mat &m);
-
-private:
-    void resize(int r, int c);
-    void bind(void) { dd = E.data(); }
-};
-
-/* ============================================================================
- * 辅助：vect3 → Eigen 类型（支持 AutoDiff 的 Jet<T>）
+ * 辅助：Vector3d/Quaterniond → Eigen 模板类型（支持 AutoDiff 的 Jet<T>）
  * ==========================================================================*/
 template <typename T>
-inline Eigen::Matrix<T, 3, 1> toEig3(const vect3 &v) {
-    return Eigen::Matrix<T, 3, 1>(T(v.i), T(v.j), T(v.k));
+inline Eigen::Matrix<T, 3, 1> toEig3(const Eigen::Vector3d &v) {
+    return Eigen::Matrix<T, 3, 1>(T(v.x()), T(v.y()), T(v.z()));
 }
 template <typename T>
-inline Eigen::Quaternion<T> toEigQ(const quat &q) {
-    return Eigen::Quaternion<T>(T(q.q0), T(q.q1), T(q.q2), T(q.q3));
+inline Eigen::Quaternion<T> toEigQ(const Eigen::Quaterniond &q) {
+    return Eigen::Quaternion<T>(T(q.w()), T(q.x()), T(q.y()), T(q.z()));
 }
 
-/* 模糊度 key：(ref_sat, sat, freq) → int */
-inline int ambKey(int ref_sat, int sat, int freq) {
-    return ((ref_sat & 0x3F) << 16) | ((sat & 0x3F) << 8) | (freq & 0x0F);
+/* ============================ 模糊度键与管理 ============================
+ *
+ * 频率槽 slot：0..MAX_FREQ-1 为逐频（L1/L2/L5），100/200/300 为宽巷/窄巷/无电离层组合。
+ * 弧段号 arc：同一 (卫星, 槽) 上的连续跟踪弧。发生周跳后 arc+1，
+ *             新弧使用新的模糊度参数（旧弧的键保留到被清理为止）。
+ *
+ * 【为什么必须是 64 位】旧实现是
+ *     ((ref_sat & 0x3F) << 16) | ((sat & 0x3F) << 8) | (freq & 0x0F)
+ * 把卫星号截断到 6 bit(0..63)：任何编号相差 64 的卫星（多系统 sys*100+prn、
+ * 北斗 C01–C63 等）都会**静默共用同一个模糊度参数**，而且键里没有系统号/弧段号。
+ * 这里改成 16 bit 卫星号 + 8 bit 槽 + 24 bit 弧段。 */
+enum AmbSlot {
+    AMB_SLOT_L1 = 0,
+    AMB_SLOT_L2 = 1,
+    AMB_SLOT_L5 = 2,
+    AMB_SLOT_WL = 100,
+    AMB_SLOT_NL = 200,
+    AMB_SLOT_IF = 300,
+};
+
+using AmbKey = uint64_t;
+using AmbMap = std::map<AmbKey, std::array<double, 1>>;
+
+inline AmbKey ambKey(int ref_sat, int sat, int slot, int arc = 0) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(ref_sat) & 0xFFFFu) << 48)
+         | (static_cast<uint64_t>(static_cast<uint32_t>(sat)     & 0xFFFFu) << 32)
+         | (static_cast<uint64_t>(static_cast<uint32_t>(slot)    & 0xFFu)   << 24)
+         |  static_cast<uint64_t>(static_cast<uint32_t>(arc)     & 0xFFFFFFu);
 }
+inline int ambKeyRefSat(AmbKey k) { return static_cast<int>((k >> 48) & 0xFFFFu); }
+inline int ambKeySat   (AmbKey k) { return static_cast<int>((k >> 32) & 0xFFFFu); }
+inline int ambKeySlot  (AmbKey k) { return static_cast<int>((k >> 24) & 0xFFu); }
+inline int ambKeyArc   (AmbKey k) { return static_cast<int>(k & 0xFFFFFFu); }
+
+/* 参考星切换的整数转换：对每个卫星 i，
+ *     N_{k'}^i = N_k^i − N_k^{k'}
+ * 只有当 k' 相对旧参考 k 也存在模糊度时才能转换；否则新键以 0 起步（等价于重新收敛）。
+ * 返回成功转换的卫星个数。 */
+int ambPromoteReference(AmbMap &m, int old_ref, int new_ref, int slot, int arc = 0);
+
+/* 周跳/断弧：把卫星 sat 在槽 slot 上的弧段推进到 new_arc。
+ * 新键的初值取旧弧当前值（周跳后可用 slip_cycles 修正），返回新键。 */
+AmbKey ambAdvanceArc(AmbMap &m, int ref_sat, int sat, int slot, int new_arc,
+                     double slip_cycles = 0.0);
+
+/* 清理本窗口未再出现的旧键（避免键集只增不减、影响协方差提取） */
+void ambPruneUnused(AmbMap &m, const std::set<AmbKey> &used);
 
 /* 把切空间 ∂r/∂δφ 投影成 ambient 四元数雅可比（PoseManifold::PlusJacobian
  * 是 0.5·Q(q)，两侧相乘后严格还原 ∂r/∂δφ） */
-inline void projPhiToQAmbient(const vect3& dr_dphi, const quat& q, double* out4) {
-    const double qx = q.q1, qy = q.q2, qz = q.q3, qw = q.q0;
-    out4[0] = 2.0 * ( dr_dphi.i *  qw + dr_dphi.j * (-qz) + dr_dphi.k *  qy);
-    out4[1] = 2.0 * ( dr_dphi.i *  qz + dr_dphi.j *  qw  + dr_dphi.k * (-qx));
-    out4[2] = 2.0 * ( dr_dphi.i * (-qy) + dr_dphi.j *  qx + dr_dphi.k *  qw);
-    out4[3] = 2.0 * ( dr_dphi.i * (-qx) + dr_dphi.j * (-qy) + dr_dphi.k * (-qz));
+inline void projPhiToQAmbient(const Eigen::Vector3d& dr_dphi, const Eigen::Quaterniond& q, double* out4) {
+    const double qx = q.x(), qy = q.y(), qz = q.z(), qw = q.w();
+    out4[0] = 2.0 * ( dr_dphi.x() *  qw + dr_dphi.y() * (-qz) + dr_dphi.z() *  qy);
+    out4[1] = 2.0 * ( dr_dphi.x() *  qz + dr_dphi.y() *  qw  + dr_dphi.z() * (-qx));
+    out4[2] = 2.0 * ( dr_dphi.x() * (-qy) + dr_dphi.y() *  qx + dr_dphi.z() *  qw);
+    out4[3] = 2.0 * ( dr_dphi.x() * (-qx) + dr_dphi.y() * (-qy) + dr_dphi.z() * (-qz));
 }
+
 /* ============================ 姿态 / 旋转 ============================ */
-mat3 a2mat(const vect3 &att);           /*< [pitch,roll,yaw]   -> Cnb  */
-quat a2qua(double pitch, double roll, double yaw);
-quat a2qua(const vect3 &att);
-vect3 m2att(const mat3 &Cnb);           /*< Cnb -> [pitch,roll,yaw]    */
-vect3 q2att(const quat &qnb);
+Eigen::Matrix3d a2mat(const Eigen::Vector3d &att);           /*< [pitch,roll,yaw]   -> Cnb  */
+Eigen::Quaterniond a2qua(double pitch, double roll, double yaw);
+Eigen::Quaterniond a2qua(const Eigen::Vector3d &att);
+Eigen::Vector3d m2att(const Eigen::Matrix3d &Cnb);           /*< Cnb -> [pitch,roll,yaw]    */
+Eigen::Vector3d q2att(const Eigen::Quaterniond &qnb);
+void setYaw(Eigen::Quaterniond &q, double yaw = 0.0);
 
-mat3 ar2mat(const vect3 &attr);         /*< 反序欧拉角 -> Cnb          */
-quat ar2qua(const vect3 &attr);
-vect3 m2attr(const mat3 &Cnb);
-vect3 q2attr(const quat &qnb);
+Eigen::Matrix3d ar2mat(const Eigen::Vector3d &attr);         /*< 反序欧拉角 -> Cnb          */
+Eigen::Quaterniond ar2qua(const Eigen::Vector3d &attr);
+Eigen::Vector3d m2attr(const Eigen::Matrix3d &Cnb);
+Eigen::Vector3d q2attr(const Eigen::Quaterniond &qnb);
 
-quat rv2q(const vect3 &rv);             /*< 旋转矢量 -> 四元数         */
-mat3 rv2m(const vect3 &rv);
-vect3 q2rv(const quat &q);
-vect3 m2rv(const mat3 &Cnb);
+Eigen::Quaterniond rv2q(const Eigen::Vector3d &rv);             /*< 旋转矢量 -> 四元数         */
+Eigen::Matrix3d rv2m(const Eigen::Vector3d &rv);
+Eigen::Vector3d q2rv(const Eigen::Quaterniond &q);
+Eigen::Vector3d m2rv(const Eigen::Matrix3d &Cnb);
 
-mat3 q2mat(const quat &qnb);
-quat m2qua(const mat3 &Cnb);
-mat3 askew(const vect3 &v);
+/* 四元数右乘扰动的显式接口（对应旧 quat::operator+ / operator-）：
+ *   q ⊕ φ = rv2q(-φ) ⊗ q ,  q ⊖ φ = rv2q(φ) ⊗ q
+ * 单独写成自由函数而不是给 Eigen 类型重载运算符，避免污染 Eigen 的语义。 */
+inline Eigen::Quaterniond qPlusPhi(const Eigen::Quaterniond &q, const Eigen::Vector3d &phi) {
+    return rv2q(-phi) * q;
+}
 
-vect3 qq2phi(const quat &qcalcu, const quat &qreal);
-quat addmu(const quat &q, const vect3 &mu);
-quat UpDown(const quat &q);
-vect3 q2att(const quat &qnb);
+inline Eigen::Quaterniond qMinusPhi(const Eigen::Quaterniond &q, const Eigen::Vector3d &phi) {
+    return rv2q(phi) * q;
+}
 
-vect3 sv2att(const vect3 &fb, double yaw0, const vect3 &fn);
-vect3 vn2att(const vect3 &vn);
+Eigen::Matrix3d q2mat(const Eigen::Quaterniond &qnb);
+Eigen::Quaterniond m2qua(const Eigen::Matrix3d &Cnb);
+Eigen::Matrix3d askew(const Eigen::Vector3d &v);
+
+Eigen::Vector3d qq2phi(const Eigen::Quaterniond &qcalcu, const Eigen::Quaterniond &qreal);
+Eigen::Quaterniond addmu(const Eigen::Quaterniond &q, const Eigen::Vector3d &mu);
+Eigen::Quaterniond UpDown(const Eigen::Quaterniond &q);
+Eigen::Vector3d q2att(const Eigen::Quaterniond &qnb);
+
+Eigen::Vector3d sv2att(const Eigen::Vector3d &fb, double yaw0, const Eigen::Vector3d &fn);
+Eigen::Vector3d vn2att(const Eigen::Vector3d &vn);
 double vn2att(double vel_east, double vel_north);
+/* ============================ Matrix3d 线性代数 ============================ */
+Eigen::Matrix3d Rot(double angle, char axis);
+Eigen::Matrix3d rcijk(const Eigen::Matrix3d &m, int ijk);
+double trMMT(const Eigen::Matrix3d &m1, const Eigen::Matrix3d &m2 = I33);
+void symmetry(Eigen::Matrix3d &m);
+Eigen::Matrix3d pow(const Eigen::Matrix3d &m, int k);
+double trace(const Eigen::Matrix3d &m);
+double det(const Eigen::Matrix3d &m);
+Eigen::Matrix3d adj(const Eigen::Matrix3d &m);
+Eigen::Matrix3d inv(const Eigen::Matrix3d &m);
+Eigen::Vector3d diag(const Eigen::Matrix3d &m);
+Eigen::Matrix3d diag(const Eigen::Vector3d &v);
+Eigen::Matrix3d askew(const Eigen::Matrix3d &m, int I);
+Eigen::Matrix3d dotmul(const Eigen::Matrix3d &m1, const Eigen::Matrix3d &m2);
+Eigen::Matrix3d MMT(const Eigen::Matrix3d &m1, const Eigen::Matrix3d &m2);
+Eigen::Matrix3d randn(const Eigen::Matrix3d &mu, const double &sigma);
 
-/* ============================ mat3 线性代数 ============================ */
-mat3 Rot(double angle, char axis);
-mat3 rcijk(const mat3 &m, int ijk);
-double trMMT(const mat3 &m1, const mat3 &m2 = I33);
-void symmetry(mat3 &m);
-mat3 pow(const mat3 &m, int k);
-double trace(const mat3 &m);
-double det(const mat3 &m);
-mat3 adj(const mat3 &m);
-mat3 inv(const mat3 &m);
-vect3 diag(const mat3 &m);
-mat3 diag(const vect3 &v);
-mat3 askew(const mat3 &m, int I);
-mat3 dotmul(const mat3 &m1, const mat3 &m2);
-mat3 MMT(const mat3 &m1, const mat3 &m2);
-double norm(const mat3 &m);
-mat3 randn(const mat3 &mu, const double &sigma);
+/* ============================ Vector3d 标量 / 矢量工具 ============================ */
+int IsZeros(const Eigen::Vector3d &v, double eps = EPS);
+int IsZero(const double &val, double eps = EPS);
+uint8_t IsZerosXY(const Eigen::Vector3d &v, double eps = EPS);
+uint8_t IsNaN(const Eigen::Vector3d &v);
+double diffYaw(double yaw, double yaw0);
+Eigen::Vector3d abs(const Eigen::Vector3d &v);
+Eigen::Vector3d maxabs(const Eigen::Vector3d &v1, const Eigen::Vector3d &v2);
+double normXY(const Eigen::Vector3d &v);
+double normXYInf(const Eigen::Vector3d &v);
+Eigen::Vector3d sqrt(const Eigen::Vector3d &v);
+Eigen::Vector3d pow(const Eigen::Vector3d &v, int k);
+double dot(const Eigen::Vector3d &v1, const Eigen::Vector3d &v2);
+Eigen::Vector3d dotmul(const Eigen::Vector3d &v1, const Eigen::Vector3d &v2);
+Eigen::Matrix3d vxv(const Eigen::Vector3d &v1, const Eigen::Vector3d &v2);
+double sinAng(const Eigen::Vector3d &v1, const Eigen::Vector3d &v2);
+Eigen::Vector3d sort(const Eigen::Vector3d &v);
+Eigen::Vector3d randn(const Eigen::Vector3d &mu, const Eigen::Vector3d &sigma);
+double MKQt(double sR, double tau);
+Eigen::Vector3d MKQt(const Eigen::Vector3d &sR, const Eigen::Vector3d &tau);
 
-/* ============================ vect 线性代数 ============================ */
-vect abs(const vect &v);
-double norm(const vect &v);
-double norm1(const vect &v);
-double normInf(const vect &v);
-vect pow(const vect &v, int k);
-vect sort(const vect &v);
-double dot(const vect &v1, const vect &v2);
-vect dotmul(const vect &v1, const vect &v2);
-vect randn(const vect &mu, const vect &sigma);
+/* ============================ 动态向量线性代数（Eigen） ============================ */
+double norm1(const double *pd, int n);
+double normInf(const double *pd, int n);
 
-/* ============================ mat 线性代数 ============================ */
-void symmetry(mat &m);
-double trace(const mat &m);
-double norm1(const mat &m);
-double normInf(const mat &m);
-mat dotmul(const mat &m1, const mat &m2);
-vect diag(const mat &m);
-mat diag(const vect &v);
-mat eye(int n);
-mat inv4(const mat &m);
-void RowMul(mat &m, const mat &m0, const mat &m1, int r, int fast = 0);
-void RowMulT(mat &m, const mat &m0, const mat &m1, int r, int fast = 0);
-void DVMDVafa(const vect &V, mat &M, double afa);
-mat randn(const mat &mu, const double &sigma);
-mat llt_L(const mat &A);
-mat llt_sqrtinv(const mat &A);
-mat llt_inv(const mat &A);
-mat pinv_sym(const mat &A, double eps = 1e-10);
-void accumulate_normal_equations(const mat &J, const vect &r, mat &H, vect &b);
+Eigen::VectorXd absv(const Eigen::VectorXd &v);
+
+/* norm / norm1 / normInf 用模板：这样 Vector3d、Matrix3d、VectorXd、MatrixXd
+ * 以及各种 Eigen 表达式都能直接传，不会出现 "Vector3d 与 VectorXd 重载歧义"。 */
+template <typename Derived>
+inline double norm(const Eigen::MatrixBase<Derived> &v) { return v.norm(); }
+template <typename Derived>
+inline double norm1(const Eigen::MatrixBase<Derived> &v) { return v.template lpNorm<1>(); }
+template <typename Derived>
+inline double normInf(const Eigen::MatrixBase<Derived> &v) {
+    return v.template lpNorm<Eigen::Infinity>();
+}
+Eigen::VectorXd pow(const Eigen::VectorXd &v, int k);
+Eigen::VectorXd sort(const Eigen::VectorXd &v);
+double          dot(const Eigen::VectorXd &v1, const Eigen::VectorXd &v2);
+Eigen::VectorXd dotmul(const Eigen::VectorXd &v1, const Eigen::VectorXd &v2);
+Eigen::VectorXd randn(const Eigen::VectorXd &mu, const Eigen::VectorXd &sigma);
+
+/* ============================ 动态矩阵线性代数（Eigen） ============================ */
+void            symmetry(Eigen::MatrixXd &m);
+double          trace(const Eigen::MatrixXd &m);
+Eigen::MatrixXd dotmul(const Eigen::MatrixXd &m1, const Eigen::MatrixXd &m2);
+Eigen::VectorXd diag(const Eigen::MatrixXd &m);
+Eigen::MatrixXd diag(const Eigen::VectorXd &v);
+Eigen::MatrixXd eye(int n);
+Eigen::MatrixXd inv4(const Eigen::MatrixXd &m);
+Eigen::MatrixXd randn(const Eigen::MatrixXd &mu, const double &sigma);
+
+/* 对称正定线性代数：输入 / 输出都是普通 Eigen 矩阵。
+ * 返回 0×0 表示"不是正定 / 数值上过于病态"，调用方须自行走兜底路径。 */
+Eigen::MatrixXd llt_L(const Eigen::MatrixXd &A);
+Eigen::MatrixXd llt_sqrtinv(const Eigen::MatrixXd &A);
+Eigen::MatrixXd llt_inv(const Eigen::MatrixXd &A);
+Eigen::MatrixXd pinv_sym(const Eigen::MatrixXd &A, double eps = 1e-10);
+void accumulate_normal_equations(const Eigen::MatrixXd &J, const Eigen::VectorXd &r,
+                                 Eigen::MatrixXd &H, Eigen::VectorXd &b);
 
 /* Schur 补 ----------------------------------------------------------------------
  *   H, b  : 完整法方程（前 num_marginalized 维是被边缘化的状态）
  *   J_out : n_keep × n_keep，满足 J_out^T J_out = H*
  *   r_out : n_keep，满足 J_out^T r_out = b*
  * 返回 false 表示维数非法或分解失败。 -------------------------------------------*/
-bool schur_complement(const mat &H, const vect &b, int num_marginalized, mat &J_out, vect &r_out);
+bool schur_complement(const Eigen::MatrixXd &H, const Eigen::VectorXd &b, int num_marginalized,
+                      Eigen::MatrixXd &J_out, Eigen::VectorXd &r_out);
+
 /* ============================ 坐标系 ============================ */
-mat3 pos2Cen(const vect3 &pos);
-vect3 xyz2blh(const vect3 &xyz);
-vect3 blh2xyz(const vect3 &blh);
-vect3 Vxyz2enu(const vect3 &Vxyz, const vect3 &pos);
+Eigen::Matrix3d pos2Cen(const Eigen::Vector3d &pos);
+Eigen::Vector3d xyz2blh(const Eigen::Vector3d &xyz);
+Eigen::Vector3d blh2xyz(const Eigen::Vector3d &blh);
+Eigen::Vector3d Vxyz2enu(const Eigen::Vector3d &Vxyz, const Eigen::Vector3d &pos);
 
 
 class earth {
@@ -599,59 +415,59 @@ public:
     double f_RNh;  /*< 1 / RNh */
     double f_clRNh; /*< 1 / clRNh */
 
-    vect3 pos;  /*< {lat, lon, h} */
-    vect3 vn;   /*< {vE, vN, vU} */
-    vect3 wnie; /*< 地球自转在 n 系下的表示 */
-    vect3 wnen; /*< n 系相对 e 系的转动（运输率） */
-    vect3 wnin; /*< n 系相对 i 系的转动 */
-    vect3 gn;   /*< 重力矢量（ENU: {0,0,-g}） */
-    vect3 gcc;  /*< 重力 + 科氏/向心修正 */
-    vect3 *pgn; /*< 若不为空则用它替换 gn */
+    Eigen::Vector3d pos;  /*< {lat, lon, h} */
+    Eigen::Vector3d vn;   /*< {vE, vN, vU} */
+    Eigen::Vector3d wnie; /*< 地球自转在 n 系下的表示 */
+    Eigen::Vector3d wnen; /*< n 系相对 e 系的转动（运输率） */
+    Eigen::Vector3d wnin; /*< n 系相对 i 系的转动 */
+    Eigen::Vector3d gn;   /*< 重力矢量（ENU: {0,0,-g}） */
+    Eigen::Vector3d gcc;  /*< 重力 + 科氏/向心修正 */
+    Eigen::Vector3d *pgn; /*< 若不为空则用它替换 gn */
 
     earth(double a = RE, double f = f0_earth);
 
     void Init(double a = RE, double f = f0_earth);
 
     /* 由位置和速度刷新椭球/重力/角速度参数 -----------------------------------------*/
-    void Update(const vect3 &pos, const vect3 &vn);
+    void Update(const Eigen::Vector3d &pos, const Eigen::Vector3d &vn);
 
     /* 速度 -> 位置增量（{dLat, dLon, dh}） -----------------------------------------*/
-    vect3 vn2dpos(const vect3 &vn, float ts = 1.0f) const;
+    Eigen::Vector3d vn2dpos(const Eigen::Vector3d &vn, float ts = 1.0f) const;
 };
 
 class LocalFrame {
 public:
-    LocalFrame(void) { init(vect3(0.0)); }
+    LocalFrame(void) { init(Eigen::Vector3d::Zero()); }
 
     /* 以 blh0 为原点建立局部 NEU 系 ----------------------------------------------*/
-    void init(const vect3 &blh0);
+    void init(const Eigen::Vector3d &blh0);
 
     bool isInit(void) const { return init_; }
-    const vect3 &blh0(void) const { return blh0_; }
+    const Eigen::Vector3d &blh0(void) const { return blh0_; }
 
-    vect3 blh2neu(const vect3 &blh) const;
-    vect3 neu2blh(const vect3 &neu) const;
+    Eigen::Vector3d blh2neu(const Eigen::Vector3d &blh) const;
+    Eigen::Vector3d neu2blh(const Eigen::Vector3d &neu) const;
 
     /* 参考点处的 earth 模型（wnie / gn / RMh / RNh 都取这里的值） ------------------*/
     const earth &earthModel(void) const { return eth_; }
 
     /* ENU 下的重力矢量 {0, 0, -g} ------------------------------------------------*/
-    const vect3 &gravity(void) const { return gravity_; }
+    const Eigen::Vector3d &gravity(void) const { return gravity_; }
 
     /* ENU 下的地球自转 {0, wie*cos(lat0), wie*sin(lat0)} ------------------------*/
-    const vect3 &wnie(void) const { return eth_.wnie; }
+    const Eigen::Vector3d &wnie(void) const { return eth_.wnie; }
 
-    const mat3&  R_en_m3(void)   const { return R_en_m3_; }
-    const vect3& p0Ecef_v3(void) const { return p0_ecef_v3_; }
+    const Eigen::Matrix3d&  R_en_m3(void)   const { return R_en_m3_; }
+    const Eigen::Vector3d& p0Ecef_v3(void) const { return p0_ecef_v3_; }
 
 private:
     bool init_{false};
-    vect3 blh0_;
-    vect3 gravity_;
+    Eigen::Vector3d blh0_;
+    Eigen::Vector3d gravity_;
     earth eth_;
 
-    mat3  R_en_m3_{1, 0, 0, 0, 1, 0, 0, 0, 1};
-    vect3 p0_ecef_v3_{0.0, 0.0, 0.0};
+    Eigen::Matrix3d  R_en_m3_ = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d p0_ecef_v3_ = Eigen::Vector3d::Zero();
 };
 
 
@@ -660,19 +476,19 @@ public:
     double tk;       /*< 当前时间 */
     float nts;       /*< 本次更新覆盖的时间 */
     float _nts;      /*< 1 / nts */
-    mat3 Kg;         /*< 陀螺标定阵 */
-    vect3 eb;        /*< 陀螺零偏 */
-    mat3 Ka;         /*< 加表标定阵 */
-    vect3 db;        /*< 加表零偏 */
+    Eigen::Matrix3d Kg;         /*< 陀螺标定阵 */
+    Eigen::Vector3d eb;        /*< 陀螺零偏 */
+    Eigen::Matrix3d Ka;         /*< 加表标定阵 */
+    Eigen::Vector3d db;        /*< 加表零偏 */
 
-    vect3 phim;      /*< 角度增量（已含圆锥补偿） */
-    vect3 dvbm;      /*< 速度增量（已含划桨补偿） */
-    vect3 wmm;       /*< 角速率测量之和 */
-    vect3 vmm;       /*< 比力测量之和 */
-    vect3 swmm;      /*< 角速率累加 */
-    vect3 svmm;      /*< 比力累加 */
-    vect3 wm_1;      /*< 上一采样角增量 */
-    vect3 vm_1;      /*< 上一采样速度增量 */
+    Eigen::Vector3d phim;      /*< 角度增量（已含圆锥补偿） */
+    Eigen::Vector3d dvbm;      /*< 速度增量（已含划桨补偿） */
+    Eigen::Vector3d wmm;       /*< 角速率测量之和 */
+    Eigen::Vector3d vmm;       /*< 比力测量之和 */
+    Eigen::Vector3d swmm;      /*< 角速率累加 */
+    Eigen::Vector3d svmm;      /*< 比力累加 */
+    Eigen::Vector3d wm_1;      /*< 上一采样角增量 */
+    Eigen::Vector3d vm_1;      /*< 上一采样速度增量 */
 
     int nSamples;    /*< 本次更新的子样数（1~5） */
     bool preFirst;   /*< 是否为上电后的第一次更新 */
@@ -684,14 +500,14 @@ public:
     /* 复位（保留标定参数），onePlusPre 默认打开 --------------------------------*/
     void Reset(void);
 
-    void SetKga(const mat3 &Kg0, const vect3 eb0, const mat3 &Ka0, const vect3 &db0);
+    void SetKga(const Eigen::Matrix3d &Kg0, const Eigen::Vector3d eb0, const Eigen::Matrix3d &Ka0, const Eigen::Vector3d &db0);
 
     /* 由等间隔采样增量计算 phim / dvbm
      *   pwm[i] : 第 i 个子样的角增量  (rad)
      *   pvm[i] : 第 i 个子样的速度增量 (m/s)
      *   nSamples: 1~5，ts: 单个子样的时间
      * 返回更新后的时间 tk -----------------------------------------------------------*/
-    double Update(const vect3 *pwm, const vect3 *pvm, int nSamples, double ts);
+    double Update(const Eigen::Vector3d *pwm, const Eigen::Vector3d *pvm, int nSamples, double ts);
 };
 
 struct PreintegrationParam {
@@ -702,39 +518,39 @@ struct PreintegrationParam {
     double corr_time{3600.0}; /*< 零偏一阶马尔可夫相关时间 s */
 
     /* ---- 里程计（use_odometer = true 时生效）---- */
-    vect3 odo_std;             /*< 单次里程增量的白噪声标准差 (m) */
+    Eigen::Vector3d odo_std;             /*< 单次里程增量的白噪声标准差 (m) */
     double odo_srw{0.0};       /*< 里程计比例因子随机游走 (1/sqrt(s)) */
-    vect3 abv;                 /*< 安装角 [pitch, 0, yaw]，与 ipos3g 的 odo::ODKappa 一致 */
-    vect3 lvOD;                /*< 里程计杆臂（b 系，m） */
+    Eigen::Vector3d abv;                 /*< 安装角 [pitch, 0, yaw]，与 ipos3g 的 odo::ODKappa 一致 */
+    Eigen::Vector3d lvOD;                /*< 里程计杆臂（b 系，m） */
 };
 
 /* 关键帧状态 ---------------------------------------------------------------------*/
 struct State {
     double time{0.0};
-    vect3 p;                       /*< 局部 NEU 位置 (m) */
-    quat q{1.0, 0.0, 0.0, 0.0};    /*< b -> n */
-    vect3 v;                       /*< n 系速度 (m/s) */
-    vect3 bg;                      /*< 陀螺零偏 (rad/s) */
-    vect3 ba;                      /*< 加表零偏 (m/s^2) */
+    Eigen::Vector3d p;                       /*< 局部 NEU 位置 (m) */
+    Eigen::Quaterniond q{1.0, 0.0, 0.0, 0.0};    /*< b -> n */
+    Eigen::Vector3d v;                       /*< n 系速度 (m/s) */
+    Eigen::Vector3d bg;                      /*< 陀螺零偏 (rad/s) */
+    Eigen::Vector3d ba;                      /*< 加表零偏 (m/s^2) */
     double sodo{0.0};              /*< 里程计比例因子误差（无量纲） */
-    vect3 s;                       /*< 预积分里程位移（b0 系，m），仅内部使用 */
+    Eigen::Vector3d s;                       /*< 预积分里程位移（b0 系，m），仅内部使用 */
 };
 
 /* 观测 ---------------------------------------------------------------------------*/
 struct ImuMeas {
     double time{0.0};
     double dt{0.0};
-    vect3 dtheta; /*< 角增量 (rad) */
-    vect3 dvel;   /*< 速度增量 (m/s) */
+    Eigen::Vector3d dtheta; /*< 角增量 (rad) */
+    Eigen::Vector3d dvel;   /*< 速度增量 (m/s) */
     double odovel{0.0}; /*< 本次采样间隔内的里程增量 (m)，对应 OB_GINS 的 imu.odovel */
 };
 
 struct GnssMeas {
     double time{0.0};
-    vect3 blh;    /*< {lat, lon, h}，弧度/米 */
-    vect3 std;    /*< 位置 {sigma_E, sigma_N, sigma_U}，米（局部 NEU） */
-    vect3 vn;     /*< n 系速度 (m/s)，需要时填（ipos3g 的 KF 就用它） */
-    vect3 vn_std; /*< 速度标准差 (m/s) */
+    Eigen::Vector3d blh;    /*< {lat, lon, h}，弧度/米 */
+    Eigen::Vector3d std;    /*< 位置 {sigma_E, sigma_N, sigma_U}，米（局部 NEU） */
+    Eigen::Vector3d vn;     /*< n 系速度 (m/s)，需要时填（ipos3g 的 KF 就用它） */
+    Eigen::Vector3d vn_std; /*< 速度标准差 (m/s) */
     double yaw{0.0};     /*< 双天线航向 (rad)，yaw_std<=0 表示无效 */
     double yaw_std{0.0}; /*< 航向标准差 (rad) */
 };
@@ -748,14 +564,14 @@ struct OdoMeas {
 /* ---- 归一化平面上的视觉观测（后端因子使用） ---- */
 struct VisualObs {
     int    feat_id{0};
-    vect3  xyz_c{0.0, 0.0, 0.0};   /* (X/Z, Y/Z, 1) */
+    Eigen::Vector3d  xyz_c{0.0, 0.0, 0.0};   /* (X/Z, Y/Z, 1) */
     double sigma{1.5 / 460.0};
 };
 
 struct SatState {
     int    sat_id{0};
-    vect3  pos_ecef;
-    vect3  vel_ecef;
+    Eigen::Vector3d  pos_ecef;
+    Eigen::Vector3d  vel_ecef;
     double clk_bias_s{0.0};
     double clk_drift_sps{0.0};
     double elev_rad{0.0};
@@ -833,24 +649,24 @@ struct CalibState {
     double sodo{0.0};
     double abv_pitch{0.0};
     double abv_yaw{0.0};
-    vect3  lvOD{0.0, 0.0, 0.0};
+    Eigen::Vector3d  lvOD{0.0, 0.0, 0.0};
     double yaw_gnss_offset{0.0};
     /* ---- 相机外参（新增） ---- */
-    vect3  t_bc{0.0, 0.0, 0.0};
-    quat   q_bc{1.0, 0.0, 0.0, 0.0};
+    Eigen::Vector3d  t_bc{0.0, 0.0, 0.0};
+    Eigen::Quaterniond   q_bc{1.0, 0.0, 0.0, 0.0};
 
     void toData(double *d) const {
         d[0]=sodo; d[1]=abv_pitch; d[2]=abv_yaw;
-        d[3]=lvOD.i; d[4]=lvOD.j; d[5]=lvOD.k;
+        d[3]=lvOD.x(); d[4]=lvOD.y(); d[5]=lvOD.z();
         d[6]=yaw_gnss_offset;
-        d[7]=t_bc.i; d[8]=t_bc.j; d[9]=t_bc.k;
-        d[10]=q_bc.q1; d[11]=q_bc.q2; d[12]=q_bc.q3; d[13]=q_bc.q0;
+        d[7]=t_bc.x(); d[8]=t_bc.y(); d[9]=t_bc.z();
+        d[10]=q_bc.x(); d[11]=q_bc.y(); d[12]=q_bc.z(); d[13]=q_bc.w();
     }
     void fromData(const double *d) {
         sodo=d[0]; abv_pitch=d[1]; abv_yaw=d[2];
-        lvOD=vect3(d[3],d[4],d[5]); yaw_gnss_offset=d[6];
-        t_bc=vect3(d[7],d[8],d[9]);
-        q_bc=quat(d[13],d[10],d[11],d[12]);
+        lvOD=Eigen::Vector3d(d[3],d[4],d[5]); yaw_gnss_offset=d[6];
+        t_bc=Eigen::Vector3d(d[7],d[8],d[9]);
+        q_bc=Eigen::Quaterniond(d[13],d[10],d[11],d[12]);
     }
 };
 
@@ -859,23 +675,23 @@ struct Frame {
     double time{0.0};
     /* Ceres 参数块（顺序与 gopt_types.h 一致）。数组固定长度，保证地址稳定 ----*/
     std::array<double, NUM_POSE> pose{};     /*< {pE,pN,pU, qx,qy,qz,qw} */
-    std::array<double, NUM_MIX_ODO> mix{};   /*< {v, bg, ba [, sodo]} */
+    std::array<double, NUM_MIX_ODO> mix{};   /*< {v, bg, ba} */
 
     /* 到下一关键帧的预积分（最后一帧为空） ----------------------------------*/
     std::shared_ptr<Preintegration> pre_to_next;
 
     /* 该帧上的 GNSS 位置观测（已转到局部 ENU） -------------------------------*/
     bool has_gnss{false};
-    vect3 gnss_pos{};
-    vect3 gnss_std{1.0, 1.0, 1.0};
-    vect3 gnss_std0{1.0, 1.0, 1.0}; /*< 原始 std，重加权时以它为基准（避免累乘） */
+    Eigen::Vector3d gnss_pos{};
+    Eigen::Vector3d gnss_std{1.0, 1.0, 1.0};
+    Eigen::Vector3d gnss_std0{1.0, 1.0, 1.0}; /*< 原始 std，重加权时以它为基准（避免累乘） */
     double gnss_time{0.0};
     bool   gnss_in_gap{false};      /*< 该帧落在模拟的 GNSS 中断区间（只做参考，不入因子） */
 
     /* 该帧上的 GNSS 速度观测 ------------------------------------*/
     bool has_gnss_vel{false};
-    vect3 gnss_vn{};
-    vect3 gnss_vn_std{1.0, 1.0, 1.0};
+    Eigen::Vector3d gnss_vn{};
+    Eigen::Vector3d gnss_vn_std{1.0, 1.0, 1.0};
 
     /* 静止段标记（由 IMU 判据得到，见 Estimator::updateStaticDetector） -------------*/
     bool is_static{false};
@@ -901,7 +717,7 @@ struct Frame {
     bool   has_odo{false};
     double odo_dS{0.0};               /*< 里程增量 (m) */
     double odo_dt{0.0};               /*< 对应时间间隔 (s) */
-    vect3  odo_omega_meas{};          /*< 该段陀螺原始测量 (rad/s)，用于杆臂补偿 */
+    Eigen::Vector3d  odo_omega_meas{};          /*< 该段陀螺原始测量 (rad/s)，用于杆臂补偿 */
     double odo_std{0.05};             /*< 里程速度标准差 (m/s) */
 
     std::vector<VisualObs> visual_obs;
@@ -909,6 +725,10 @@ struct Frame {
     /* ---- GNSS 紧组合 ---- */
     bool has_gnss_raw{false};
     std::vector<DDObs>  dd_obs;
+    /* 与 dd_obs 并行：每 (DD, slot) 对应的弧段号。周跳时该 (ref_sat,sat,slot)
+     * 的弧段号 +1，用于给模糊度参数生成稳定的键；不这样做的话一旦周跳
+     * 就会复用旧弧的模糊度参数，整周解会被污染。 */
+    std::vector<std::array<int, MAX_FREQ>> dd_arc;
     std::vector<std::array<double, MAX_FREQ>> amb_values;
     std::vector<std::array<bool,   MAX_FREQ>> amb_fixed;
     std::vector<double> amb_wl_values;
@@ -932,15 +752,15 @@ public:
         x_plus[1] = x[1] + delta[1];
         x_plus[2] = x[2] + delta[2];
 
-        quat q(x[6], x[3], x[4], x[5]);
-        quat dq = rv2q(vect3(delta[3], delta[4], delta[5]));
-        quat q_new = q * dq;
-        normlize(&q_new);
+        Eigen::Quaterniond q(x[6], x[3], x[4], x[5]);
+        Eigen::Quaterniond dq = rv2q(Eigen::Vector3d(delta[3], delta[4], delta[5]));
+        Eigen::Quaterniond q_new = q * dq;
+        normlize(q_new);
 
-        x_plus[3] = q_new.q1;
-        x_plus[4] = q_new.q2;
-        x_plus[5] = q_new.q3;
-        x_plus[6] = q_new.q0;
+        x_plus[3] = q_new.x();
+        x_plus[4] = q_new.y();
+        x_plus[5] = q_new.z();
+        x_plus[6] = q_new.w();
         return true;
     }
 
@@ -970,12 +790,12 @@ public:
         y_minus_x[1] = y[1] - x[1];
         y_minus_x[2] = y[2] - x[2];
 
-        quat qx(x[6], x[3], x[4], x[5]);
-        quat qy(y[6], y[3], y[4], y[5]);
-        vect3 dphi = q2rv((~qx) * qy);
-        y_minus_x[3] = dphi.i;
-        y_minus_x[4] = dphi.j;
-        y_minus_x[5] = dphi.k;
+        Eigen::Quaterniond qx(x[6], x[3], x[4], x[5]);
+        Eigen::Quaterniond qy(y[6], y[3], y[4], y[5]);
+        Eigen::Vector3d dphi = q2rv(((qx.conjugate())) * qy);
+        y_minus_x[3] = dphi.x();
+        y_minus_x[4] = dphi.y();
+        y_minus_x[5] = dphi.z();
         return true;
     }
 
@@ -992,13 +812,20 @@ public:
         /* 位置部分 */
         J.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity();
 
-        /* 旋转部分：pose 中四元数顺序为 [qx, qy, qz, qw] */
+        /* 旋转部分：pose 中四元数顺序为 [qx, qy, qz, qw]
+         *
+         * Minus(y,x) = Log(x⁻¹⊗y)，令 y = x + dx，则
+         *   vec(x⁻¹⊗dx) = w·dv − dw·v − v×dv
+         *   δφ = 2·(w·dv − dw·v − v×dv)
+         * 于是 ∂δφ/∂(qx,qy,qz,qw) = 2·Qᵀ = 下面这一份。
+         * 必须与 CalibManifold::MinusJacobian 同式，且满足
+         * MinusJacobian·PlusJacobian = I_6。 */
         const double qx = x[3], qy = x[4], qz = x[5], qw = x[6];
 
         Eigen::Matrix<double, 3, 4> Jq;
-        Jq << -qy,  qx, -qw,  qz,
+        Jq <<  qw,  qz, -qy, -qx,
               -qz,  qw,  qx, -qy,
-              -qw, -qz,  qy,  qx;
+               qy, -qx,  qw, -qz;
         Jq *= 2.0;
 
         J.block<3, 4>(3, 3) = Jq;
@@ -1019,14 +846,14 @@ public:
 
     bool Plus(const double* x, const double* delta, double* x_plus) const override {
         for (int i = 0; i < 10; ++i) x_plus[i] = x[i] + delta[i];
-        quat q(x[13], x[10], x[11], x[12]);   /* (w, x, y, z) */
-        quat dq = rv2q(vect3(delta[10], delta[11], delta[12]));
-        quat q_new = q * dq;
-        normlize(&q_new);
-        x_plus[10] = q_new.q1;
-        x_plus[11] = q_new.q2;
-        x_plus[12] = q_new.q3;
-        x_plus[13] = q_new.q0;
+        Eigen::Quaterniond q(x[13], x[10], x[11], x[12]);   /* (w, x, y, z) */
+        Eigen::Quaterniond dq = rv2q(Eigen::Vector3d(delta[10], delta[11], delta[12]));
+        Eigen::Quaterniond q_new = q * dq;
+        normlize(q_new);
+        x_plus[10] = q_new.x();
+        x_plus[11] = q_new.y();
+        x_plus[12] = q_new.z();
+        x_plus[13] = q_new.w();
         return true;
     }
 
@@ -1047,12 +874,12 @@ public:
 
     bool Minus(const double* y, const double* x, double* y_minus_x) const override {
         for (int i = 0; i < 10; ++i) y_minus_x[i] = y[i] - x[i];
-        quat qy(y[13], y[10], y[11], y[12]);
-        quat qx(x[13], x[10], x[11], x[12]);
-        vect3 dphi = q2rv((~qx) * qy);
-        y_minus_x[10] = dphi.i;
-        y_minus_x[11] = dphi.j;
-        y_minus_x[12] = dphi.k;
+        Eigen::Quaterniond qy(y[13], y[10], y[11], y[12]);
+        Eigen::Quaterniond qx(x[13], x[10], x[11], x[12]);
+        Eigen::Vector3d dphi = q2rv(((qx.conjugate())) * qy);
+        y_minus_x[10] = dphi.x();
+        y_minus_x[11] = dphi.y();
+        y_minus_x[12] = dphi.z();
         return true;
     }
 
@@ -1102,7 +929,7 @@ public:
     void repropagation(void);
 
     /* ---- 设置线性化点处的零偏（会触发 repropagation） ---- */
-    void setBias(const vect3 &bg, const vect3 &ba);
+    void setBias(const Eigen::Vector3d &bg, const Eigen::Vector3d &ba);
 
     /* ---- 丢弃 repropagation 用的历史测量 ----
      * 滑窗优化里 pre_to_next 只用来求残差，不会再改零偏重放，
@@ -1112,18 +939,18 @@ public:
     /* ---- 访问器 ---- */
     double        dt(void) const { return dt_; }
     int           num(void) const { return num_; }
-    const vect3  &p(void) const { return p_; }   /*< Δp_ij */
-    const vect3  &v(void) const { return v_; }   /*< Δv_ij */
-    const quat   &q(void) const { return q_; }   /*< Δq_ij */
-    const vect3  &bg(void) const { return bg_; }
-    const vect3  &ba(void) const { return ba_; }
-    const vect3 &s(void)    const { return s_; }
+    const Eigen::Vector3d  &p(void) const { return p_; }   /*< Δp_ij */
+    const Eigen::Vector3d  &v(void) const { return v_; }   /*< Δv_ij */
+    const Eigen::Quaterniond   &q(void) const { return q_; }   /*< Δq_ij */
+    const Eigen::Vector3d  &bg(void) const { return bg_; }
+    const Eigen::Vector3d  &ba(void) const { return ba_; }
+    const Eigen::Vector3d &s(void)    const { return s_; }
     double       sodo(void) const { return sodo_; }
     const CovMatrix &cov(void) const { return cov_; }
     const JacMatrix &jac(void) const { return jac_; }
 
     /* 残余残差项的快捷访问（供图优化残差使用） */
-    Eigen::Matrix3d R0(void) const { return qI.toEigen().toRotationMatrix(); }
+    Eigen::Matrix3d R0(void) const { return qI.toRotationMatrix(); }
 
 private:
     void propagate(const ImuMeas &meas);
@@ -1135,7 +962,7 @@ private:
     GainMatrix  buildG(const Eigen::Matrix3d &R) const;
     NoiseMatrix buildQ(double dt) const;
 
-    vect3  s_{O31};      /*< 预积分里程位移（b0 系） */
+    Eigen::Vector3d  s_{O31};      /*< 预积分里程位移（b0 系） */
     double sodo_{0.0};   /*< 里程比例因子误差 */
 
     PreintegrationParam param_;
@@ -1144,17 +971,17 @@ private:
     /* ---- 累加状态 ---- */
     double dt_   = 0.0;
     int    num_  = 0;
-    vect3  p_{O31};
-    vect3  v_{O31};
-    quat   q_{qI};
+    Eigen::Vector3d  p_{O31};
+    Eigen::Vector3d  v_{O31};
+    Eigen::Quaterniond   q_{qI};
 
     /* ---- 线性化点处的零偏 ---- */
-    vect3  bg_{O31};
-    vect3  ba_{O31};
+    Eigen::Vector3d  bg_{O31};
+    Eigen::Vector3d  ba_{O31};
 
     /* ---- 中值积分缓存 ---- */
-    vect3  last_dtheta_{O31};
-    vect3  last_dvel_{O31};
+    Eigen::Vector3d  last_dtheta_{O31};
+    Eigen::Vector3d  last_dvel_{O31};
     double last_dt_ = 0.0;
     bool   first_   = true;
 
@@ -1174,7 +1001,7 @@ public:
     void reset();
 
     /* 追加一个残差块：H += Jᵀ J, b += Jᵀ r */
-    void addResidual(const mat &J, const vect &r);
+    void addResidual(const Eigen::MatrixXd &J, const Eigen::VectorXd &r);
 
     /* 边缘化前 num_marginalized 维。成功返回 true。
      * 若之前已 call 过 setPrior，会在原有先验基础上继续累积。 */
@@ -1182,22 +1009,22 @@ public:
 
     /* 把外部的先验（例如上一次边缘化的输出）作为新的残差加入。
      *   通常用于跨窗口传递：把 (J_out, r_out) 作为第一个残差块。 */
-    void setPrior(const mat &J_out, const vect &r_out);
+    void setPrior(const Eigen::MatrixXd &J_out, const Eigen::VectorXd &r_out);
 
     /* 访问器 */
     int  dim(void) const { return n_; }
-    const mat  &H(void) const { return H_; }
-    const vect &b(void) const { return b_; }
-    const mat  &J_prior(void) const { return J_prior_; }
-    const vect &r_prior(void) const { return r_prior_; }
+    const Eigen::MatrixXd  &H(void) const { return H_; }
+    const Eigen::VectorXd  &b(void) const { return b_; }
+    const Eigen::MatrixXd  &J_prior(void) const { return J_prior_; }
+    const Eigen::VectorXd  &r_prior(void) const { return r_prior_; }
 
 private:
     int  n_{0};
-    mat  H_{};
-    vect b_{};
+    Eigen::MatrixXd  H_{};
+    Eigen::VectorXd  b_{};
     /* 上一次边缘化得到的先验 */
-    mat  J_prior_{};
-    vect r_prior_{};
+    Eigen::MatrixXd  J_prior_{};
+    Eigen::VectorXd  r_prior_{};
 };
 
 
@@ -1217,11 +1044,11 @@ private:
  * whiten = true 时再乘 S = sqrt_information，S·P·Sᵀ = I（P 为预积分协方差）。
  * ==========================================================================*/
 struct PreintResidual {
-    PreintResidual(const Preintegration &p, const vect3 &g, bool whiten, bool use_bias_jac)
+    PreintResidual(const Preintegration &p, const Eigen::Vector3d &g, bool whiten, bool use_bias_jac)
         : preint_(p), g_n_(g) {
         /* 线性化点处的零偏 */
-        bg_lin_ = p.bg().toEigen();
-        ba_lin_ = p.ba().toEigen();
+        bg_lin_ = p.bg();
+        ba_lin_ = p.ba();
 
         /* 零偏雅可比：Φ 的分块 */
         const Eigen::Matrix<double, 15, 15> &J = p.jac();
@@ -1239,9 +1066,9 @@ struct PreintResidual {
         }
 
         if (whiten) {
-            const mat S = llt_sqrtinv(mat(p.cov()));
-            if (S.row == 15) {
-                S_ = S.toEigen();
+            const Eigen::MatrixXd S = llt_sqrtinv(p.cov());
+            if (S.rows() == 15) {
+                S_ = S;
                 whiten_ = true;
             }
         }
@@ -1305,7 +1132,7 @@ struct PreintResidual {
     }
 
     Preintegration preint_;
-    vect3         g_n_;
+    Eigen::Vector3d         g_n_;
     Eigen::Matrix<double, 3, 3> Jp_bg_{Eigen::Matrix3d::Zero()}, Jp_ba_{Eigen::Matrix3d::Zero()};
     Eigen::Matrix<double, 3, 3> Jv_bg_{Eigen::Matrix3d::Zero()}, Jv_ba_{Eigen::Matrix3d::Zero()};
     Eigen::Matrix<double, 3, 3> Jq_bg_{Eigen::Matrix3d::Zero()};
@@ -1319,7 +1146,7 @@ struct PreintResidual {
  * 因子 2：GNSS 位置（3 维）
  * ==========================================================================*/
 struct GnssPosResidual {
-    GnssPosResidual(const vect3 &pos, const vect3 &std_dev)
+    GnssPosResidual(const Eigen::Vector3d &pos, const Eigen::Vector3d &std_dev)
         : pos_(pos), std_(std_dev) {}
 
     template <typename T>
@@ -1332,7 +1159,7 @@ struct GnssPosResidual {
         return true;
     }
 
-    vect3 pos_, std_;
+    Eigen::Vector3d pos_, std_;
 };
 
 
@@ -1343,7 +1170,7 @@ struct GnssPosResidual {
  *   残差：r_i = (v_i - vn_i) / sigma_i，可加 Huber
  * ==========================================================================*/
 struct GnssVelResidual {
-    GnssVelResidual(const vect3 &vn, const vect3 &std_dev, double huber_delta = 0.0)
+    GnssVelResidual(const Eigen::Vector3d &vn, const Eigen::Vector3d &std_dev, double huber_delta = 0.0)
         : vn_(vn), std_(std_dev), huber_delta_(huber_delta) {}
 
     template <typename T>
@@ -1372,7 +1199,7 @@ struct GnssVelResidual {
         return true;
     }
 
-    vect3 vn_, std_;
+    Eigen::Vector3d vn_, std_;
     double huber_delta_;
 };
 
@@ -1452,45 +1279,106 @@ struct StaticVelResidual {
 };
 
 /* ============================================================================
- * 因子 6：边缘化先验（r 维）
- *   残差 = J_prior * δx - r_prior
- *   其中 δx 由"当前帧参数 - 线性化点参数"构成，这里简化为
- *   直接以切空间向量作为参数块（调用方需保证一致）。
- *   实用实现通常为每个被先验覆盖的参数块单独定义 residual，
- *   这里用动态维度版以展示接口。
+ * 边缘化先验（多参数块 + 流形感知）
+ *
+ * 残差：      ρ(δ) = J_out · δ + r_out
+ *             其中 δ 是各保留参数块**相对线性化点**的切空间增量：
+ *               POSE   : δ = Log(x_lin⁻¹ ⊗ x)        （PoseManifold::Minus）
+ *               CALIB  : δ = CalibManifold::Minus(x, x_lin)
+ *               ADDITIVE: δ = x − x_lin               （mix、模糊度等纯加性块）
+ * 雅可比：    ∂ρ/∂ambient_i = J_out[:, off_i : off_i+t_i] · MinusJacobian_i(x_i)
+ *
+ * 符号：本工程法方程约定 b = Jᵀr，schur_complement 保持该约定输出
+ *       J_outᵀ r_out = b*。Ceres 因子 ρ 对 b 的贡献是 Jᵀρ(0)，
+ *       要等于 b* 就必须 ρ(0) = r_out ⇒ ρ(δ) = J·δ + r_out（加号）。
+ *
+ * 与旧版的区别：旧版把 J.clm 维当成**一个** ambient 参数块，而 pose 是
+ * ambient 7 / tangent 6（带流形），ambient 维数根本不等于切空间维数，
+ * 因此永远挂不到 buildProblem 建出来的参数块上。这里按块分别声明与求导。
  * ==========================================================================*/
+enum class MargBlockKind { ADDITIVE, POSE, CALIB };
+
+struct MargPriorBlock {
+    std::vector<double> lin;                        /*< 线性化点的 ambient 值副本 */
+    int ambient{0};
+    int tangent{0};
+    MargBlockKind kind{MargBlockKind::ADDITIVE};
+};
+
 class MarginalizationPriorFactor : public ceres::CostFunction {
 public:
-    MarginalizationPriorFactor(const mat &J, const vect &r)
-        : J_(J), r_(r) {
-        set_num_residuals(J.row);
-        /* 列数 = 切空间维数（这里不含 sodo，纯 15 维）*/
-        mutable_parameter_block_sizes()->push_back(J.clm);
+    MarginalizationPriorFactor(const Eigen::MatrixXd &J, const Eigen::VectorXd &r,
+                               std::vector<MargPriorBlock> blocks)
+        : J_(J), r_(r), blocks_(std::move(blocks)) {
+        set_num_residuals(static_cast<int>(J_.rows()));
+        for (const auto &b : blocks_) {
+            mutable_parameter_block_sizes()->push_back(b.ambient);
+            offsets_.push_back(n_tan_);
+            n_tan_ += b.tangent;
+        }
     }
 
-    bool Evaluate(const double *const *params,
-                  double *residuals,
+    bool Evaluate(const double *const *params, double *residuals,
                   double **jacobians) const override {
-        const double *dx = params[0];
-        Eigen::Map<const Eigen::VectorXd> dx_e(dx, J_.clm);
-        Eigen::Map<const Eigen::MatrixXd> J_e(J_.dd, J_.row, J_.clm);
-        Eigen::Map<const Eigen::VectorXd> r_e(r_.dd, r_.rc);
-        Eigen::Map<Eigen::VectorXd>       res(residuals, J_.row);
+        const int nr = static_cast<int>(J_.rows());
+        const int nc = static_cast<int>(J_.cols());
+        if (nc != n_tan_) return false;
 
-        res = J_e * dx_e - r_e;
+        Eigen::VectorXd dx(n_tan_);
+        for (size_t i = 0; i < blocks_.size(); ++i) {
+            const MargPriorBlock &b = blocks_[i];
+            const double *x = params[i];
+            const int off = offsets_[i];
+            if (b.kind == MargBlockKind::POSE) {
+                double dphi[6];
+                pose_.Minus(x, b.lin.data(), dphi);
+                for (int k2 = 0; k2 < 6; ++k2) dx(off + k2) = dphi[k2];
+            } else if (b.kind == MargBlockKind::CALIB) {
+                double d[13];
+                calib_.Minus(x, b.lin.data(), d);
+                for (int k2 = 0; k2 < 13; ++k2) dx(off + k2) = d[k2];
+            } else {
+                for (int k2 = 0; k2 < b.tangent; ++k2) dx(off + k2) = x[k2] - b.lin[k2];
+            }
+        }
 
-        if (jacobians && jacobians[0]) {
-            Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
-                                     Eigen::RowMajor>>
-                Jout(jacobians[0], J_.row, J_.clm);
-            Jout = J_e;
+        Eigen::Map<Eigen::VectorXd> res(residuals, nr);
+        res.noalias() = J_ * dx + r_;
+
+        if (jacobians) {
+            for (size_t i = 0; i < blocks_.size(); ++i) {
+                if (!jacobians[i]) continue;
+                const MargPriorBlock &b = blocks_[i];
+                const int off = offsets_[i];
+                Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
+                                         Eigen::RowMajor>> Ji(jacobians[i], nr, b.ambient);
+                const auto Jblk = J_.block(0, off, nr, b.tangent);
+                if (b.kind == MargBlockKind::POSE) {
+                    Eigen::Matrix<double, 6, 7, Eigen::RowMajor> M;
+                    pose_.MinusJacobian(params[i], M.data());
+                    Ji.noalias() = Jblk * M;
+                } else if (b.kind == MargBlockKind::CALIB) {
+                    Eigen::Matrix<double, 13, 14, Eigen::RowMajor> M;
+                    calib_.MinusJacobian(params[i], M.data());
+                    Ji.noalias() = Jblk * M;
+                } else {
+                    Ji = Jblk;
+                }
+            }
         }
         return true;
     }
 
+    int tangentSize(void) const { return n_tan_; }
+
 private:
-    mat  J_;
-    vect r_;
+    Eigen::MatrixXd J_;
+    Eigen::VectorXd r_;
+    std::vector<MargPriorBlock> blocks_;
+    std::vector<int> offsets_;
+    int n_tan_{0};
+    PoseManifold  pose_;    /*< 仅用于求 Minus / MinusJacobian（无状态） */
+    CalibManifold calib_;
 };
 
 /* ============================================================================
@@ -1507,7 +1395,7 @@ private:
  *     calib[6]     = yaw_off（本因子不使用）
  * ==========================================================================*/
 struct OdoVelResidual {
-    OdoVelResidual(double dS, double dt, const vect3 &omega_meas,
+    OdoVelResidual(double dS, double dt, const Eigen::Vector3d &omega_meas,
                    double sigma, double huber_delta = 0.0)
         : dS_(dS),
           dt_(dt > 1e-9 ? dt : 1e-9),
@@ -1538,9 +1426,9 @@ struct OdoVelResidual {
 
         /* --- 杆臂：omega_ib^b × l_OD --- */
         Eigen::Matrix<T, 3, 1> w(
-            T(omega_meas_.i) - bg(0),
-            T(omega_meas_.j) - bg(1),
-            T(omega_meas_.k) - bg(2));
+            T(omega_meas_.x()) - bg(0),
+            T(omega_meas_.y()) - bg(1),
+            T(omega_meas_.z()) - bg(2));
         Eigen::Matrix<T, 3, 1> v_lev = w.cross(l);
 
         /* --- 里程计速度（b 系） --- */
@@ -1567,12 +1455,12 @@ struct OdoVelResidual {
     }
 
     double dS_, dt_;
-    vect3  omega_meas_;
+    Eigen::Vector3d  omega_meas_;
     double sigma_, huber_delta_;
 };
 
 /* ============================================================================
- * 因子 8：视觉重投影（2 维，手写雅可比，纯 mat3 / vect3 运算）
+ * 因子 8：视觉重投影（2 维，手写雅可比，纯 Matrix3d / Vector3d 运算）
  *
  * 参数块顺序：pose_i[7] · pose_j[7] · calib[14] · inv_depth[1]
  *
@@ -1583,7 +1471,7 @@ struct OdoVelResidual {
  *   Ceres 的 PoseManifold 会自动把结果投影到 6 维切空间。
  * ==========================================================================*/
 struct VisualReprojResidual : public ceres::CostFunction {
-    VisualReprojResidual(const vect3& obs_i, const vect3& obs_j, double sigma)
+    VisualReprojResidual(const Eigen::Vector3d& obs_i, const Eigen::Vector3d& obs_j, double sigma)
         : obs_i_(obs_i), obs_j_(obs_j),
           sigma_inv_(1.0 / (sigma > 1e-9 ? sigma : 1e-9)) {
         set_num_residuals(2);
@@ -1602,88 +1490,96 @@ struct VisualReprojResidual : public ceres::CostFunction {
         const double* calib  = params[2];
         const double  rho    = params[3][0];
 
-        const vect3 p_i(pose_i[0], pose_i[1], pose_i[2]);
-        const quat  q_i(pose_i[6], pose_i[3], pose_i[4], pose_i[5]);
-        const vect3 p_j(pose_j[0], pose_j[1], pose_j[2]);
-        const quat  q_j(pose_j[6], pose_j[3], pose_j[4], pose_j[5]);
+        const Eigen::Vector3d p_i(pose_i[0], pose_i[1], pose_i[2]);
+        const Eigen::Quaterniond  q_i(pose_i[6], pose_i[3], pose_i[4], pose_i[5]);
+        const Eigen::Vector3d p_j(pose_j[0], pose_j[1], pose_j[2]);
+        const Eigen::Quaterniond  q_j(pose_j[6], pose_j[3], pose_j[4], pose_j[5]);
 
-        const vect3 t_bc(calib[7], calib[8], calib[9]);
-        const quat  q_bc(calib[13], calib[10], calib[11], calib[12]);
+        const Eigen::Vector3d t_bc(calib[7], calib[8], calib[9]);
+        const Eigen::Quaterniond  q_bc(calib[13], calib[10], calib[11], calib[12]);
 
         /* ---------- 2) 旋转矩阵 ---------- */
-        const mat3 R_i  = q2mat(q_i);
-        const mat3 R_j  = q2mat(q_j);
-        const mat3 R_bc = q2mat(q_bc);
+        const Eigen::Matrix3d R_i  = q2mat(q_i);
+        const Eigen::Matrix3d R_j  = q2mat(q_j);
+        const Eigen::Matrix3d R_bc = q2mat(q_bc);
 
         /* ---------- 3) T_wc_i / T_wc_j ---------- */
-        const mat3  R_wc_i = R_i * R_bc;
-        const vect3 p_wc_i = p_i + R_i * t_bc;    /* mat3 * vect3 */
+        const Eigen::Matrix3d  R_wc_i = R_i * R_bc;
+        const Eigen::Vector3d p_wc_i = p_i + R_i * t_bc;    /* Eigen::Matrix3d * Eigen::Vector3d */
 
-        const mat3  R_wc_j = R_j * R_bc;
-        const vect3 p_wc_j = p_j + R_j * t_bc;
+        const Eigen::Matrix3d  R_wc_j = R_j * R_bc;
+        const Eigen::Vector3d p_wc_j = p_j + R_j * t_bc;
 
         /* ---------- 4) 特征点在相机 i 系下的 3D 坐标 ---------- */
         const double inv_rho = 1.0 / rho;
-        const vect3  P_c_i(obs_i_.i * inv_rho,
-                           obs_i_.j * inv_rho,
+        const Eigen::Vector3d  P_c_i(obs_i_.x() * inv_rho,
+                           obs_i_.y() * inv_rho,
                            inv_rho);
 
         /* ---------- 5) 转世界系，再转相机 j 系 ---------- */
-        const vect3 P_w   = p_wc_i + R_wc_i * P_c_i;
-        const vect3 P_c_j = (~R_wc_j) * (P_w - p_wc_j);
+        const Eigen::Vector3d P_w   = p_wc_i + R_wc_i * P_c_i;
+        const Eigen::Vector3d P_c_j = ((R_wc_j.transpose())) * (P_w - p_wc_j);
 
         /* ---------- 6) 残差 ---------- */
-        double Z = P_c_j.k;
-        if (std::fabs(Z) < 1e-6) Z = 1e-6;
+        double Z = P_c_j.z();
+        /* 深度钳位：必须是"单侧"钳位。
+         * 原先用 std::fabs(Z) < 1e-6 会把 Z∈(−1e-6,0) 翻成 +1e-6 —— 深度符号
+         * 被翻转，投影变成镜像的"看起来合理"的残差，会把 BA 拉向错误解。
+         * 这里改成 Z<=1e-6（含 NaN）一律钳到 1e-6：不翻符号、不给 NaN，
+         * 负深度会得到很大的残差，从而把点推回相机前方。
+         * （更彻底的做法是在上游按 cheirality 直接剔除该观测，
+         *   但那需要改动 VisualObs 的生产方，留作后续工作。） */
+        if (!(Z > 1e-6)) Z = 1e-6;
         const double Zinv = 1.0 / Z;
-        const double X_Z  = P_c_j.i * Zinv;
-        const double Y_Z  = P_c_j.j * Zinv;
+        const double X_Z  = P_c_j.x() * Zinv;
+        const double Y_Z  = P_c_j.y() * Zinv;
 
-        residuals[0] = (X_Z - obs_j_.i) * sigma_inv_;
-        residuals[1] = (Y_Z - obs_j_.j) * sigma_inv_;
+        residuals[0] = (X_Z - obs_j_.x()) * sigma_inv_;
+        residuals[1] = (Y_Z - obs_j_.y()) * sigma_inv_;
 
         if (jacobians == nullptr) return true;
 
-        /* ---------- 7) 投影函数的雅可比：用两行 vect3 表示 ---------- */
-        const vect3 J_pi_0(Zinv, 0.0, -X_Z * Zinv);
-        const vect3 J_pi_1(0.0, Zinv, -Y_Z * Zinv);
+        /* ---------- 7) 投影函数的雅可比：用两行 Vector3d 表示 ---------- */
+        const Eigen::Vector3d J_pi_0(Zinv, 0.0, -X_Z * Zinv);
+        const Eigen::Vector3d J_pi_1(0.0, Zinv, -Y_Z * Zinv);
 
-        const mat3 R_wc_j_T = ~R_wc_j;
+        const Eigen::Matrix3d R_wc_j_T = (R_wc_j.transpose());
 
         /* ---------- 8) 对 pose_i 的雅可比（2×7 ambient） ---------- */
         if (jacobians[0] != nullptr) {
             /* 特征在 body_i 系下的坐标 */
-            const vect3 P_i_Bi = t_bc + R_bc * P_c_i;
+            const Eigen::Vector3d P_i_Bi = t_bc + R_bc * P_c_i;
 
             /* ∂r/∂p_i = σ⁻¹ · J_pi · R_wc_j^T           (2×3) */
-            const vect3 dpi_p0 = J_pi_0 * R_wc_j_T;
-            const vect3 dpi_p1 = J_pi_1 * R_wc_j_T;
+            /* 旧 vect3 * Matrix3d 语义是行向量右乘 vᵀM，等价写成 (Mᵀ·v) */
+            const Eigen::Vector3d dpi_p0 = R_wc_j_T.transpose() * J_pi_0;
+            const Eigen::Vector3d dpi_p1 = R_wc_j_T.transpose() * J_pi_1;
 
             /* ∂r/∂φ_i = -σ⁻¹ · J_pi · R_wc_j^T · R_i · [P_i_Bi]_×  (2×3) */
-            const mat3 tmp     = R_wc_j_T * R_i * askew(P_i_Bi);
-            const vect3 dpi_phi0 = J_pi_0 * tmp;
-            const vect3 dpi_phi1 = J_pi_1 * tmp;
+            const Eigen::Matrix3d tmp     = R_wc_j_T * R_i * askew(P_i_Bi);
+            const Eigen::Vector3d dpi_phi0 = tmp.transpose() * J_pi_0;
+            const Eigen::Vector3d dpi_phi1 = tmp.transpose() * J_pi_1;
 
             /* 位置 3 列 */
-            jacobians[0][0 * 7 + 0] = dpi_p0.i * sigma_inv_;
-            jacobians[0][0 * 7 + 1] = dpi_p0.j * sigma_inv_;
-            jacobians[0][0 * 7 + 2] = dpi_p0.k * sigma_inv_;
-            jacobians[0][1 * 7 + 0] = dpi_p1.i * sigma_inv_;
-            jacobians[0][1 * 7 + 1] = dpi_p1.j * sigma_inv_;
-            jacobians[0][1 * 7 + 2] = dpi_p1.k * sigma_inv_;
+            jacobians[0][0 * 7 + 0] = dpi_p0.x() * sigma_inv_;
+            jacobians[0][0 * 7 + 1] = dpi_p0.y() * sigma_inv_;
+            jacobians[0][0 * 7 + 2] = dpi_p0.z() * sigma_inv_;
+            jacobians[0][1 * 7 + 0] = dpi_p1.x() * sigma_inv_;
+            jacobians[0][1 * 7 + 1] = dpi_p1.y() * sigma_inv_;
+            jacobians[0][1 * 7 + 2] = dpi_p1.z() * sigma_inv_;
 
             /* ∂r/∂q = 2·(∂r/∂δφ)·Q(q)^T，Q(q)^T 的 4 列按 [qx, qy, qz, qw] 排列：
             *   col(qx) = ( qw, -qz,  qy)
             *   col(qy) = ( qz,  qw, -qx)
             *   col(qz) = (-qy,  qx,  qw)
             *   col(qw) = (-qx, -qy, -qz) */
-            const double qx = q_i.q1, qy = q_i.q2, qz = q_i.q3, qw = q_i.q0;
-            const vect3 dphi_r0(-dpi_phi0.i, -dpi_phi0.j, -dpi_phi0.k);
-            const vect3 dphi_r1(-dpi_phi1.i, -dpi_phi1.j, -dpi_phi1.k);
-            const vect3 col_qx( qw, -qz,  qy);
-            const vect3 col_qy( qz,  qw, -qx);
-            const vect3 col_qz(-qy,  qx,  qw);
-            const vect3 col_qw(-qx, -qy, -qz);
+            const double qx = q_i.x(), qy = q_i.y(), qz = q_i.z(), qw = q_i.w();
+            const Eigen::Vector3d dphi_r0(-dpi_phi0.x(), -dpi_phi0.y(), -dpi_phi0.z());
+            const Eigen::Vector3d dphi_r1(-dpi_phi1.x(), -dpi_phi1.y(), -dpi_phi1.z());
+            const Eigen::Vector3d col_qx( qw, -qz,  qy);
+            const Eigen::Vector3d col_qy( qz,  qw, -qx);
+            const Eigen::Vector3d col_qz(-qy,  qx,  qw);
+            const Eigen::Vector3d col_qw(-qx, -qy, -qz);
 
             jacobians[0][0*7+3] = 2.0 * dot(dphi_r0, col_qx) * sigma_inv_;
             jacobians[0][0*7+4] = 2.0 * dot(dphi_r0, col_qy) * sigma_inv_;
@@ -1698,23 +1594,23 @@ struct VisualReprojResidual : public ceres::CostFunction {
         /* ---------- 9) 对 pose_j 的雅可比（2×7 ambient） ---------- */
         if (jacobians[1] != nullptr) {
             /* 特征在 body_j 系下的坐标 */
-            const vect3 P_Bj = (~R_j) * (P_w - p_j);
+            const Eigen::Vector3d P_Bj = ((R_j.transpose())) * (P_w - p_j);
 
             /* ∂r/∂p_j = -σ⁻¹ · J_pi · R_wc_j^T */
-            const vect3 dpj_p0 = J_pi_0 * R_wc_j_T;
-            const vect3 dpj_p1 = J_pi_1 * R_wc_j_T;
+            const Eigen::Vector3d dpj_p0 = R_wc_j_T.transpose() * J_pi_0;
+            const Eigen::Vector3d dpj_p1 = R_wc_j_T.transpose() * J_pi_1;
 
             /* ∂r/∂φ_j = σ⁻¹ · J_pi · R_bc^T · [P_Bj]_× */
-            const mat3 tmp     = (~R_bc) * askew(P_Bj);
-            const vect3 dpj_phi0 = J_pi_0 * tmp;
-            const vect3 dpj_phi1 = J_pi_1 * tmp;
+            const Eigen::Matrix3d tmp     = ((R_bc.transpose())) * askew(P_Bj);
+            const Eigen::Vector3d dpj_phi0 = tmp.transpose() * J_pi_0;
+            const Eigen::Vector3d dpj_phi1 = tmp.transpose() * J_pi_1;
 
-            jacobians[1][0*7+0] = -dpj_p0.i * sigma_inv_;
-            jacobians[1][0*7+1] = -dpj_p0.j * sigma_inv_;
-            jacobians[1][0*7+2] = -dpj_p0.k * sigma_inv_;
-            jacobians[1][1*7+0] = -dpj_p1.i * sigma_inv_;
-            jacobians[1][1*7+1] = -dpj_p1.j * sigma_inv_;
-            jacobians[1][1*7+2] = -dpj_p1.k * sigma_inv_;
+            jacobians[1][0*7+0] = -dpj_p0.x() * sigma_inv_;
+            jacobians[1][0*7+1] = -dpj_p0.y() * sigma_inv_;
+            jacobians[1][0*7+2] = -dpj_p0.z() * sigma_inv_;
+            jacobians[1][1*7+0] = -dpj_p1.x() * sigma_inv_;
+            jacobians[1][1*7+1] = -dpj_p1.y() * sigma_inv_;
+            jacobians[1][1*7+2] = -dpj_p1.z() * sigma_inv_;
 
             /* ∂r/∂q_j = 2·(∂r/∂δφ_j)·Q(q_j)^T
             * Q(q_j)^T 的 4 列按 [qx, qy, qz, qw]：
@@ -1722,13 +1618,13 @@ struct VisualReprojResidual : public ceres::CostFunction {
             *   col(qy) = ( qz,  qw, -qx)
             *   col(qz) = (-qy,  qx,  qw)
             *   col(qw) = (-qx, -qy, -qz)  */
-            const double qx = q_j.q1, qy = q_j.q2, qz = q_j.q3, qw = q_j.q0;
-            const vect3 col_qx( qw, -qz,  qy);
-            const vect3 col_qy( qz,  qw, -qx);
-            const vect3 col_qz(-qy,  qx,  qw);
-            const vect3 col_qw(-qx, -qy, -qz);
-            const vect3 dr0(dpj_phi0.i, dpj_phi0.j, dpj_phi0.k);
-            const vect3 dr1(dpj_phi1.i, dpj_phi1.j, dpj_phi1.k);
+            const double qx = q_j.x(), qy = q_j.y(), qz = q_j.z(), qw = q_j.w();
+            const Eigen::Vector3d col_qx( qw, -qz,  qy);
+            const Eigen::Vector3d col_qy( qz,  qw, -qx);
+            const Eigen::Vector3d col_qz(-qy,  qx,  qw);
+            const Eigen::Vector3d col_qw(-qx, -qy, -qz);
+            const Eigen::Vector3d dr0(dpj_phi0.x(), dpj_phi0.y(), dpj_phi0.z());
+            const Eigen::Vector3d dr1(dpj_phi1.x(), dpj_phi1.y(), dpj_phi1.z());
 
             jacobians[1][0*7+3] = 2.0 * dot(dr0, col_qx) * sigma_inv_;
             jacobians[1][0*7+4] = 2.0 * dot(dr0, col_qy) * sigma_inv_;
@@ -1751,35 +1647,35 @@ struct VisualReprojResidual : public ceres::CostFunction {
             /* ∂r/∂t_bc = σ⁻¹ · J_pi · (R_wc_j^T · R_i - R_bc^T)
             * 注意：δt 在机体系（CalibManifold::Plus 是纯加性扰动），
             *       所以是 R_bc^T，不是 I_3（那是相机系扰动的结果）。 */
-            const mat3 Rd = R_wc_j_T * R_i - (~R_bc);
+            const Eigen::Matrix3d Rd = R_wc_j_T * R_i - ((R_bc.transpose()));
 
-            const vect3 dt_0 = J_pi_0 * Rd;
-            const vect3 dt_1 = J_pi_1 * Rd;
+            const Eigen::Vector3d dt_0 = Rd.transpose() * J_pi_0;
+            const Eigen::Vector3d dt_1 = Rd.transpose() * J_pi_1;
 
-            jacobians[2][0*NUM_CALIB + 7] = dt_0.i * sigma_inv_;
-            jacobians[2][0*NUM_CALIB + 8] = dt_0.j * sigma_inv_;
-            jacobians[2][0*NUM_CALIB + 9] = dt_0.k * sigma_inv_;
-            jacobians[2][1*NUM_CALIB + 7] = dt_1.i * sigma_inv_;
-            jacobians[2][1*NUM_CALIB + 8] = dt_1.j * sigma_inv_;
-            jacobians[2][1*NUM_CALIB + 9] = dt_1.k * sigma_inv_;
+            jacobians[2][0*NUM_CALIB + 7] = dt_0.x() * sigma_inv_;
+            jacobians[2][0*NUM_CALIB + 8] = dt_0.y() * sigma_inv_;
+            jacobians[2][0*NUM_CALIB + 9] = dt_0.z() * sigma_inv_;
+            jacobians[2][1*NUM_CALIB + 7] = dt_1.x() * sigma_inv_;
+            jacobians[2][1*NUM_CALIB + 8] = dt_1.y() * sigma_inv_;
+            jacobians[2][1*NUM_CALIB + 9] = dt_1.z() * sigma_inv_;
 
             /* --- 对 q_bc（calib[10..13]）---
              * ∂r/∂φ_bc = σ⁻¹ · J_pi · ([P_c_j]_× - R_wc_j^T · R_wc_i · [P_c_i]_×)
              */
-            const mat3 inner = R_wc_j_T * R_wc_i * askew(P_c_i);
-            const mat3 outer = askew(P_c_j) - inner;
+            const Eigen::Matrix3d inner = R_wc_j_T * R_wc_i * askew(P_c_i);
+            const Eigen::Matrix3d outer = askew(P_c_j) - inner;
 
-            const vect3 dphi_0 = J_pi_0 * outer;
-            const vect3 dphi_1 = J_pi_1 * outer;
+            const Eigen::Vector3d dphi_0 = outer.transpose() * J_pi_0;
+            const Eigen::Vector3d dphi_1 = outer.transpose() * J_pi_1;
 
-            const double qbx = q_bc.q1, qby = q_bc.q2,
-                        qbz = q_bc.q3, qbw = q_bc.q0;
-            const vect3 col_qx( qbw, -qbz,  qby);
-            const vect3 col_qy( qbz,  qbw, -qbx);
-            const vect3 col_qz(-qby,  qbx,  qbw);
-            const vect3 col_qw(-qbx, -qby, -qbz);
-            const vect3 dr0(dphi_0.i, dphi_0.j, dphi_0.k);
-            const vect3 dr1(dphi_1.i, dphi_1.j, dphi_1.k);
+            const double qbx = q_bc.x(), qby = q_bc.y(),
+                        qbz = q_bc.z(), qbw = q_bc.w();
+            const Eigen::Vector3d col_qx( qbw, -qbz,  qby);
+            const Eigen::Vector3d col_qy( qbz,  qbw, -qbx);
+            const Eigen::Vector3d col_qz(-qby,  qbx,  qbw);
+            const Eigen::Vector3d col_qw(-qbx, -qby, -qbz);
+            const Eigen::Vector3d dr0(dphi_0.x(), dphi_0.y(), dphi_0.z());
+            const Eigen::Vector3d dr1(dphi_1.x(), dphi_1.y(), dphi_1.z());
 
             jacobians[2][0*NUM_CALIB + 10] = 2.0 * dot(dr0, col_qx) * sigma_inv_;
             jacobians[2][0*NUM_CALIB + 11] = 2.0 * dot(dr0, col_qy) * sigma_inv_;
@@ -1796,7 +1692,7 @@ struct VisualReprojResidual : public ceres::CostFunction {
             /* ∂r/∂ρ = -σ⁻¹/ρ · J_pi · R_wc_j^T · R_wc_i · P_c_i
             * 注意 J_pi_k 是 3D 行向量，右侧 (R_wc_j^T·R_wc_i·P_c_i) 是 3D 列向量，
             * 二者相乘是点乘（不是叉乘） */
-            const vect3 u = R_wc_j_T * (R_wc_i * P_c_i);   /* 3D 向量 */
+            const Eigen::Vector3d u = R_wc_j_T * (R_wc_i * P_c_i);   /* 3D 向量 */
             const double dr0 = dot(J_pi_0, u);
             const double dr1 = dot(J_pi_1, u);
             jacobians[3][0] = -dr0 * sigma_inv_ / rho;
@@ -1806,7 +1702,7 @@ struct VisualReprojResidual : public ceres::CostFunction {
         return true;
     }
 
-    vect3  obs_i_, obs_j_;
+    Eigen::Vector3d  obs_i_, obs_j_;
     double sigma_inv_;
 };
 
@@ -1822,10 +1718,10 @@ struct VisualReprojResidual : public ceres::CostFunction {
  * ==========================================================================*/
 struct GnssDDPseudorangeFreqResidual : public ceres::CostFunction {
     GnssDDPseudorangeFreqResidual(const DDObs& dd, int freq,
-                                  const vect3& base_pos,
-                                  const mat3&  R_en,
-                                  const vect3& p0,
-                                  const vect3& t_ant)
+                                  const Eigen::Vector3d& base_pos,
+                                  const Eigen::Matrix3d&  R_en,
+                                  const Eigen::Vector3d& p0,
+                                  const Eigen::Vector3d& t_ant)
         : dd_(dd), freq_(freq), base_pos_(base_pos),
           R_en_(R_en), p0_(p0), t_ant_(t_ant) {
         const double sigma = std::max(GPS_FREQ[freq].sigma_P * 1.4142, 0.1);
@@ -1838,38 +1734,38 @@ struct GnssDDPseudorangeFreqResidual : public ceres::CostFunction {
                   double* residuals, double** jacobians) const override {
         const double* pose = params[0];
 
-        const vect3 p_n(pose[0], pose[1], pose[2]);
-        const quat  q  (pose[6], pose[3], pose[4], pose[5]);
-        const mat3  R_bn = q2mat(q);
+        const Eigen::Vector3d p_n(pose[0], pose[1], pose[2]);
+        const Eigen::Quaterniond  q  (pose[6], pose[3], pose[4], pose[5]);
+        const Eigen::Matrix3d  R_bn = q2mat(q);
 
-        const vect3 p_e = p0_ + R_en_ * (p_n + R_bn * t_ant_);
+        const Eigen::Vector3d p_e = p0_ + R_en_ * (p_n + R_bn * t_ant_);
 
-        const vect3 si = dd_.sat_i.pos_ecef - p_e;
-        const vect3 sk = dd_.sat_k.pos_ecef - p_e;
+        const Eigen::Vector3d si = dd_.sat_i.pos_ecef - p_e;
+        const Eigen::Vector3d sk = dd_.sat_k.pos_ecef - p_e;
         const double rho_i = norm(si);
         const double rho_k = norm(sk);
         if (rho_i < 1e-6 || rho_k < 1e-6) { residuals[0] = 0.0; return true; }
 
-        const vect3 bi = dd_.sat_i.pos_ecef - base_pos_;
-        const vect3 bk = dd_.sat_k.pos_ecef - base_pos_;
+        const Eigen::Vector3d bi = dd_.sat_i.pos_ecef - base_pos_;
+        const Eigen::Vector3d bk = dd_.sat_k.pos_ecef - base_pos_;
         const double dd_rho = (rho_i - rho_k) - (norm(bi) - norm(bk));
 
         residuals[0] = (dd_.dd_P[freq_] - dd_rho) * sigma_inv_;
 
         if (jacobians == nullptr) return true;
 
-        const vect3 kappa_i = si / rho_i;
-        const vect3 kappa_k = sk / rho_k;
-        const vect3 dr_dpe  = (kappa_i - kappa_k) * sigma_inv_;
+        const Eigen::Vector3d kappa_i = si / rho_i;
+        const Eigen::Vector3d kappa_k = sk / rho_k;
+        const Eigen::Vector3d dr_dpe  = (kappa_i - kappa_k) * sigma_inv_;
 
         if (jacobians[0] != nullptr) {
-            const vect3 dr_dpn = dr_dpe * R_en_;
-            jacobians[0][0] = dr_dpn.i;
-            jacobians[0][1] = dr_dpn.j;
-            jacobians[0][2] = dr_dpn.k;
+            const Eigen::Vector3d dr_dpn = R_en_.transpose() * dr_dpe;
+            jacobians[0][0] = dr_dpn.x();
+            jacobians[0][1] = dr_dpn.y();
+            jacobians[0][2] = dr_dpn.z();
 
-            const vect3 dr_dphi =
-                (dr_dpe * R_en_ * R_bn) * (-askew(t_ant_));
+            const Eigen::Vector3d dr_dphi =
+                ((R_en_ * R_bn) * (-askew(t_ant_))).transpose() * dr_dpe;
             projPhiToQAmbient(dr_dphi, q, &jacobians[0][3]);
         }
         return true;
@@ -1877,8 +1773,8 @@ struct GnssDDPseudorangeFreqResidual : public ceres::CostFunction {
 
     DDObs  dd_;
     int    freq_;
-    vect3  base_pos_, p0_, t_ant_;
-    mat3   R_en_;
+    Eigen::Vector3d  base_pos_, p0_, t_ant_;
+    Eigen::Matrix3d   R_en_;
     double sigma_inv_;
 };
 
@@ -1890,10 +1786,10 @@ struct GnssDDPseudorangeFreqResidual : public ceres::CostFunction {
  * ==========================================================================*/
 struct GnssDDCarrierFreqResidual : public ceres::CostFunction {
     GnssDDCarrierFreqResidual(const DDObs& dd, int freq,
-                              const vect3& base_pos,
-                              const mat3&  R_en,
-                              const vect3& p0,
-                              const vect3& t_ant)
+                              const Eigen::Vector3d& base_pos,
+                              const Eigen::Matrix3d&  R_en,
+                              const Eigen::Vector3d& p0,
+                              const Eigen::Vector3d& t_ant)
         : dd_(dd), freq_(freq), base_pos_(base_pos),
           R_en_(R_en), p0_(p0), t_ant_(t_ant) {
         const double sigma = std::max(GPS_FREQ[freq].sigma_L * 1.4142, 1e-4);
@@ -1909,19 +1805,19 @@ struct GnssDDCarrierFreqResidual : public ceres::CostFunction {
         const double* pose = params[0];
         const double* amb  = params[1];
 
-        const vect3 p_n(pose[0], pose[1], pose[2]);
-        const quat  q  (pose[6], pose[3], pose[4], pose[5]);
-        const mat3  R_bn = q2mat(q);
-        const vect3 p_e  = p0_ + R_en_ * (p_n + R_bn * t_ant_);
+        const Eigen::Vector3d p_n(pose[0], pose[1], pose[2]);
+        const Eigen::Quaterniond  q  (pose[6], pose[3], pose[4], pose[5]);
+        const Eigen::Matrix3d  R_bn = q2mat(q);
+        const Eigen::Vector3d p_e  = p0_ + R_en_ * (p_n + R_bn * t_ant_);
 
-        const vect3 si = dd_.sat_i.pos_ecef - p_e;
-        const vect3 sk = dd_.sat_k.pos_ecef - p_e;
+        const Eigen::Vector3d si = dd_.sat_i.pos_ecef - p_e;
+        const Eigen::Vector3d sk = dd_.sat_k.pos_ecef - p_e;
         const double rho_i = norm(si);
         const double rho_k = norm(sk);
         if (rho_i < 1e-6 || rho_k < 1e-6) { residuals[0] = 0.0; return true; }
 
-        const vect3 bi = dd_.sat_i.pos_ecef - base_pos_;
-        const vect3 bk = dd_.sat_k.pos_ecef - base_pos_;
+        const Eigen::Vector3d bi = dd_.sat_i.pos_ecef - base_pos_;
+        const Eigen::Vector3d bk = dd_.sat_k.pos_ecef - base_pos_;
         const double dd_rho = (rho_i - rho_k) - (norm(bi) - norm(bk));
 
         residuals[0] = (lambda_ * dd_.dd_L[freq_] - dd_rho - lambda_ * amb[0])
@@ -1929,18 +1825,18 @@ struct GnssDDCarrierFreqResidual : public ceres::CostFunction {
 
         if (jacobians == nullptr) return true;
 
-        const vect3 kappa_i = si / rho_i;
-        const vect3 kappa_k = sk / rho_k;
-        const vect3 dr_dpe  = (kappa_i - kappa_k) * sigma_inv_;
+        const Eigen::Vector3d kappa_i = si / rho_i;
+        const Eigen::Vector3d kappa_k = sk / rho_k;
+        const Eigen::Vector3d dr_dpe  = (kappa_i - kappa_k) * sigma_inv_;
 
         if (jacobians[0] != nullptr) {
-            const vect3 dr_dpn = dr_dpe * R_en_;
-            jacobians[0][0] = dr_dpn.i;
-            jacobians[0][1] = dr_dpn.j;
-            jacobians[0][2] = dr_dpn.k;
+            const Eigen::Vector3d dr_dpn = R_en_.transpose() * dr_dpe;
+            jacobians[0][0] = dr_dpn.x();
+            jacobians[0][1] = dr_dpn.y();
+            jacobians[0][2] = dr_dpn.z();
 
-            const vect3 dr_dphi =
-                (dr_dpe * R_en_ * R_bn) * (-askew(t_ant_));
+            const Eigen::Vector3d dr_dphi =
+                ((R_en_ * R_bn) * (-askew(t_ant_))).transpose() * dr_dpe;
             projPhiToQAmbient(dr_dphi, q, &jacobians[0][3]);
         }
         if (jacobians[1] != nullptr) {
@@ -1951,8 +1847,8 @@ struct GnssDDCarrierFreqResidual : public ceres::CostFunction {
 
     DDObs  dd_;
     int    freq_;
-    vect3  base_pos_, p0_, t_ant_;
-    mat3   R_en_;
+    Eigen::Vector3d  base_pos_, p0_, t_ant_;
+    Eigen::Matrix3d   R_en_;
     double sigma_inv_;
     double lambda_;
 };
@@ -1963,9 +1859,9 @@ struct GnssDDCarrierFreqResidual : public ceres::CostFunction {
  * 残差：r = (λ_WL·dd_L_WL - dd_ρ - λ_WL·N_WL) / σ_WL
  * ==========================================================================*/
 struct GnssDDWideLaneResidual : public ceres::CostFunction {
-    GnssDDWideLaneResidual(const DDObs& dd, const vect3& base_pos,
-                           const mat3& R_en, const vect3& p0,
-                           const vect3& t_ant, double sigma_wl)
+    GnssDDWideLaneResidual(const DDObs& dd, const Eigen::Vector3d& base_pos,
+                           const Eigen::Matrix3d& R_en, const Eigen::Vector3d& p0,
+                           const Eigen::Vector3d& t_ant, double sigma_wl)
         : dd_(dd), base_pos_(base_pos), R_en_(R_en), p0_(p0), t_ant_(t_ant) {
         sigma_inv_ = 1.0 / std::max(sigma_wl, 0.01);
         set_num_residuals(1);
@@ -1978,43 +1874,43 @@ struct GnssDDWideLaneResidual : public ceres::CostFunction {
         const double* pose = params[0];
         const double* amb  = params[1];
 
-        const vect3 p_n(pose[0], pose[1], pose[2]);
-        const quat  q  (pose[6], pose[3], pose[4], pose[5]);
-        const mat3  R_bn = q2mat(q);
-        const vect3 p_e  = p0_ + R_en_ * (p_n + R_bn * t_ant_);
+        const Eigen::Vector3d p_n(pose[0], pose[1], pose[2]);
+        const Eigen::Quaterniond  q  (pose[6], pose[3], pose[4], pose[5]);
+        const Eigen::Matrix3d  R_bn = q2mat(q);
+        const Eigen::Vector3d p_e  = p0_ + R_en_ * (p_n + R_bn * t_ant_);
 
-        const vect3 si = dd_.sat_i.pos_ecef - p_e;
-        const vect3 sk = dd_.sat_k.pos_ecef - p_e;
+        const Eigen::Vector3d si = dd_.sat_i.pos_ecef - p_e;
+        const Eigen::Vector3d sk = dd_.sat_k.pos_ecef - p_e;
         const double rho_i = norm(si);
         const double rho_k = norm(sk);
         if (rho_i < 1e-6 || rho_k < 1e-6) { residuals[0] = 0.0; return true; }
 
-        const vect3 bi = dd_.sat_i.pos_ecef - base_pos_;
-        const vect3 bk = dd_.sat_k.pos_ecef - base_pos_;
+        const Eigen::Vector3d bi = dd_.sat_i.pos_ecef - base_pos_;
+        const Eigen::Vector3d bk = dd_.sat_k.pos_ecef - base_pos_;
         const double dd_rho = (rho_i - rho_k) - (norm(bi) - norm(bk));
 
-        const double f1 = GPS_FREQ[0].freq_hz;
-        const double f2 = GPS_FREQ[1].freq_hz;
-        const double dd_L_WL = (f1 * dd_.dd_L[0] - f2 * dd_.dd_L[1])
-                             / (f1 - f2);
+        /* 宽巷：dd_L 的单位是"周"，宽巷观测量就是 φ1 − φ2（单位：周），
+         * 乘 λ_WL 后才得到米。原先写成 (f1·ddL1 − f2·ddL2)/(f1 − f2) 会把
+         * "加权周数"当成米数用，几何项被放大 (f1+f2)/(f1−f2) ≈ 8.0588 倍。 */
+        const double dd_L_WL = dd_.dd_L[0] - dd_.dd_L[1];
 
         residuals[0] = (LAMBDA_WL * dd_L_WL - dd_rho
                         - LAMBDA_WL * amb[0]) * sigma_inv_;
 
         if (jacobians == nullptr) return true;
 
-        const vect3 kappa_i = si / rho_i;
-        const vect3 kappa_k = sk / rho_k;
-        const vect3 dr_dpe  = (kappa_i - kappa_k) * sigma_inv_;
+        const Eigen::Vector3d kappa_i = si / rho_i;
+        const Eigen::Vector3d kappa_k = sk / rho_k;
+        const Eigen::Vector3d dr_dpe  = (kappa_i - kappa_k) * sigma_inv_;
 
         if (jacobians[0] != nullptr) {
-            const vect3 dr_dpn = dr_dpe * R_en_;
-            jacobians[0][0] = dr_dpn.i;
-            jacobians[0][1] = dr_dpn.j;
-            jacobians[0][2] = dr_dpn.k;
+            const Eigen::Vector3d dr_dpn = R_en_.transpose() * dr_dpe;
+            jacobians[0][0] = dr_dpn.x();
+            jacobians[0][1] = dr_dpn.y();
+            jacobians[0][2] = dr_dpn.z();
 
-            const vect3 dr_dphi =
-                (dr_dpe * R_en_ * R_bn) * (-askew(t_ant_));
+            const Eigen::Vector3d dr_dphi =
+                ((R_en_ * R_bn) * (-askew(t_ant_))).transpose() * dr_dpe;
             projPhiToQAmbient(dr_dphi, q, &jacobians[0][3]);
         }
         if (jacobians[1] != nullptr) {
@@ -2024,8 +1920,8 @@ struct GnssDDWideLaneResidual : public ceres::CostFunction {
     }
 
     DDObs  dd_;
-    vect3  base_pos_, p0_, t_ant_;
-    mat3   R_en_;
+    Eigen::Vector3d  base_pos_, p0_, t_ant_;
+    Eigen::Matrix3d   R_en_;
     double sigma_inv_;
 };
 
@@ -2035,9 +1931,9 @@ struct GnssDDWideLaneResidual : public ceres::CostFunction {
  * 残差：r = (λ_NL·dd_L_NL - dd_ρ - λ_NL·N_NL) / σ_NL
  * ==========================================================================*/
 struct GnssDDNarrowLaneResidual : public ceres::CostFunction {
-    GnssDDNarrowLaneResidual(const DDObs& dd, const vect3& base_pos,
-                             const mat3& R_en, const vect3& p0,
-                             const vect3& t_ant, double sigma_nl)
+    GnssDDNarrowLaneResidual(const DDObs& dd, const Eigen::Vector3d& base_pos,
+                             const Eigen::Matrix3d& R_en, const Eigen::Vector3d& p0,
+                             const Eigen::Vector3d& t_ant, double sigma_nl)
         : dd_(dd), base_pos_(base_pos), R_en_(R_en), p0_(p0), t_ant_(t_ant) {
         sigma_inv_ = 1.0 / std::max(sigma_nl, 1e-4);
         set_num_residuals(1);
@@ -2050,43 +1946,43 @@ struct GnssDDNarrowLaneResidual : public ceres::CostFunction {
         const double* pose = params[0];
         const double* amb  = params[1];
 
-        const vect3 p_n(pose[0], pose[1], pose[2]);
-        const quat  q  (pose[6], pose[3], pose[4], pose[5]);
-        const mat3  R_bn = q2mat(q);
-        const vect3 p_e  = p0_ + R_en_ * (p_n + R_bn * t_ant_);
+        const Eigen::Vector3d p_n(pose[0], pose[1], pose[2]);
+        const Eigen::Quaterniond  q  (pose[6], pose[3], pose[4], pose[5]);
+        const Eigen::Matrix3d  R_bn = q2mat(q);
+        const Eigen::Vector3d p_e  = p0_ + R_en_ * (p_n + R_bn * t_ant_);
 
-        const vect3 si = dd_.sat_i.pos_ecef - p_e;
-        const vect3 sk = dd_.sat_k.pos_ecef - p_e;
+        const Eigen::Vector3d si = dd_.sat_i.pos_ecef - p_e;
+        const Eigen::Vector3d sk = dd_.sat_k.pos_ecef - p_e;
         const double rho_i = norm(si);
         const double rho_k = norm(sk);
         if (rho_i < 1e-6 || rho_k < 1e-6) { residuals[0] = 0.0; return true; }
 
-        const vect3 bi = dd_.sat_i.pos_ecef - base_pos_;
-        const vect3 bk = dd_.sat_k.pos_ecef - base_pos_;
+        const Eigen::Vector3d bi = dd_.sat_i.pos_ecef - base_pos_;
+        const Eigen::Vector3d bk = dd_.sat_k.pos_ecef - base_pos_;
         const double dd_rho = (rho_i - rho_k) - (norm(bi) - norm(bk));
 
-        const double f1 = GPS_FREQ[0].freq_hz;
-        const double f2 = GPS_FREQ[1].freq_hz;
-        const double dd_L_NL = (f1 * dd_.dd_L[0] + f2 * dd_.dd_L[1])
-                             / (f1 + f2);
+        /* 窄巷：同宽巷，dd_L 是周，窄巷观测量为 φ1 + φ2（单位：周）。
+         * 原先的 (f1·ddL1 + f2·ddL2)/(f1 + f2) 使几何项变成
+         * (f1²+f2²)/(f1+f2)² ≈ 0.5077 倍。 */
+        const double dd_L_NL = dd_.dd_L[0] + dd_.dd_L[1];
 
         residuals[0] = (LAMBDA_NL * dd_L_NL - dd_rho
                         - LAMBDA_NL * amb[0]) * sigma_inv_;
 
         if (jacobians == nullptr) return true;
 
-        const vect3 kappa_i = si / rho_i;
-        const vect3 kappa_k = sk / rho_k;
-        const vect3 dr_dpe  = (kappa_i - kappa_k) * sigma_inv_;
+        const Eigen::Vector3d kappa_i = si / rho_i;
+        const Eigen::Vector3d kappa_k = sk / rho_k;
+        const Eigen::Vector3d dr_dpe  = (kappa_i - kappa_k) * sigma_inv_;
 
         if (jacobians[0] != nullptr) {
-            const vect3 dr_dpn = dr_dpe * R_en_;
-            jacobians[0][0] = dr_dpn.i;
-            jacobians[0][1] = dr_dpn.j;
-            jacobians[0][2] = dr_dpn.k;
+            const Eigen::Vector3d dr_dpn = R_en_.transpose() * dr_dpe;
+            jacobians[0][0] = dr_dpn.x();
+            jacobians[0][1] = dr_dpn.y();
+            jacobians[0][2] = dr_dpn.z();
 
-            const vect3 dr_dphi =
-                (dr_dpe * R_en_ * R_bn) * (-askew(t_ant_));
+            const Eigen::Vector3d dr_dphi =
+                ((R_en_ * R_bn) * (-askew(t_ant_))).transpose() * dr_dpe;
             projPhiToQAmbient(dr_dphi, q, &jacobians[0][3]);
         }
         if (jacobians[1] != nullptr) {
@@ -2096,8 +1992,8 @@ struct GnssDDNarrowLaneResidual : public ceres::CostFunction {
     }
 
     DDObs  dd_;
-    vect3  base_pos_, p0_, t_ant_;
-    mat3   R_en_;
+    Eigen::Vector3d  base_pos_, p0_, t_ant_;
+    Eigen::Matrix3d   R_en_;
     double sigma_inv_;
 };
 
@@ -2107,9 +2003,9 @@ struct GnssDDNarrowLaneResidual : public ceres::CostFunction {
  * 残差：r = (dd_L_IF - dd_ρ - N_IF) / σ_IF
  * ==========================================================================*/
 struct GnssDDIFCarrierResidual : public ceres::CostFunction {
-    GnssDDIFCarrierResidual(const DDObs& dd, const vect3& base_pos,
-                            const mat3& R_en, const vect3& p0,
-                            const vect3& t_ant, double sigma_if)
+    GnssDDIFCarrierResidual(const DDObs& dd, const Eigen::Vector3d& base_pos,
+                            const Eigen::Matrix3d& R_en, const Eigen::Vector3d& p0,
+                            const Eigen::Vector3d& t_ant, double sigma_if)
         : dd_(dd), base_pos_(base_pos), R_en_(R_en), p0_(p0), t_ant_(t_ant) {
         sigma_inv_ = 1.0 / std::max(sigma_if, 1e-3);
         set_num_residuals(1);
@@ -2122,19 +2018,19 @@ struct GnssDDIFCarrierResidual : public ceres::CostFunction {
         const double* pose = params[0];
         const double* amb  = params[1];
 
-        const vect3 p_n(pose[0], pose[1], pose[2]);
-        const quat  q  (pose[6], pose[3], pose[4], pose[5]);
-        const mat3  R_bn = q2mat(q);
-        const vect3 p_e  = p0_ + R_en_ * (p_n + R_bn * t_ant_);
+        const Eigen::Vector3d p_n(pose[0], pose[1], pose[2]);
+        const Eigen::Quaterniond  q  (pose[6], pose[3], pose[4], pose[5]);
+        const Eigen::Matrix3d  R_bn = q2mat(q);
+        const Eigen::Vector3d p_e  = p0_ + R_en_ * (p_n + R_bn * t_ant_);
 
-        const vect3 si = dd_.sat_i.pos_ecef - p_e;
-        const vect3 sk = dd_.sat_k.pos_ecef - p_e;
+        const Eigen::Vector3d si = dd_.sat_i.pos_ecef - p_e;
+        const Eigen::Vector3d sk = dd_.sat_k.pos_ecef - p_e;
         const double rho_i = norm(si);
         const double rho_k = norm(sk);
         if (rho_i < 1e-6 || rho_k < 1e-6) { residuals[0] = 0.0; return true; }
 
-        const vect3 bi = dd_.sat_i.pos_ecef - base_pos_;
-        const vect3 bk = dd_.sat_k.pos_ecef - base_pos_;
+        const Eigen::Vector3d bi = dd_.sat_i.pos_ecef - base_pos_;
+        const Eigen::Vector3d bk = dd_.sat_k.pos_ecef - base_pos_;
         const double dd_rho = (rho_i - rho_k) - (norm(bi) - norm(bk));
 
         const double L1_m = GPS_FREQ[0].lambda * dd_.dd_L[0];
@@ -2145,18 +2041,18 @@ struct GnssDDIFCarrierResidual : public ceres::CostFunction {
 
         if (jacobians == nullptr) return true;
 
-        const vect3 kappa_i = si / rho_i;
-        const vect3 kappa_k = sk / rho_k;
-        const vect3 dr_dpe  = (kappa_i - kappa_k) * sigma_inv_;
+        const Eigen::Vector3d kappa_i = si / rho_i;
+        const Eigen::Vector3d kappa_k = sk / rho_k;
+        const Eigen::Vector3d dr_dpe  = (kappa_i - kappa_k) * sigma_inv_;
 
         if (jacobians[0] != nullptr) {
-            const vect3 dr_dpn = dr_dpe * R_en_;
-            jacobians[0][0] = dr_dpn.i;
-            jacobians[0][1] = dr_dpn.j;
-            jacobians[0][2] = dr_dpn.k;
+            const Eigen::Vector3d dr_dpn = R_en_.transpose() * dr_dpe;
+            jacobians[0][0] = dr_dpn.x();
+            jacobians[0][1] = dr_dpn.y();
+            jacobians[0][2] = dr_dpn.z();
 
-            const vect3 dr_dphi =
-                (dr_dpe * R_en_ * R_bn) * (-askew(t_ant_));
+            const Eigen::Vector3d dr_dphi =
+                ((R_en_ * R_bn) * (-askew(t_ant_))).transpose() * dr_dpe;
             projPhiToQAmbient(dr_dphi, q, &jacobians[0][3]);
         }
         if (jacobians[1] != nullptr) {
@@ -2166,8 +2062,8 @@ struct GnssDDIFCarrierResidual : public ceres::CostFunction {
     }
 
     DDObs  dd_;
-    vect3  base_pos_, p0_, t_ant_;
-    mat3   R_en_;
+    Eigen::Vector3d  base_pos_, p0_, t_ant_;
+    Eigen::Matrix3d   R_en_;
     double sigma_inv_;
 };
 
@@ -2307,8 +2203,8 @@ struct RunnerOptions {
     bool   use_odometer   = false;    /*< 是否启用里程计因子 */
     double odo_vel_scale  = 1.0;      /*< 整体缩放 */
     double odo_vel_std    = 0.05;     /*< 里程速度标准差 (m/s) */
-    vect3  odo_abv{0.0, 0.0, 0.0};    /*< 安装角 [pitch, 0, yaw]，rad */
-    vect3  odo_lvOD{0.0, 0.0, 0.0};   /*< 杆臂（b 系，m） */
+    Eigen::Vector3d  odo_abv{0.0, 0.0, 0.0};    /*< 安装角 [pitch, 0, yaw]，rad */
+    Eigen::Vector3d  odo_lvOD{0.0, 0.0, 0.0};   /*< 杆臂（b 系，m） */
     double odo_sodo_init  = 0.0;      /*< 刻度因子初值 */
 
     /* 每帧对比 CSV 输出（空则不输出） */
@@ -2333,8 +2229,8 @@ struct RunnerOptions {
     double wl_sigma          {0.05};
     double nl_sigma          {0.01};
     double if_sigma          {0.02};
-    vect3  gnss_ant_lever    {0.0, 0.0, 0.0};
-    vect3  base_pos_ecef     {0.0, 0.0, 0.0};
+    Eigen::Vector3d  gnss_ant_lever    {0.0, 0.0, 0.0};
+    Eigen::Vector3d  base_pos_ecef     {0.0, 0.0, 0.0};
     std::string rinex_obs_path;
     std::string rinex_nav_path;
     std::string rinex_base_path;
@@ -2344,6 +2240,7 @@ struct RunnerStats {
     int    n_frames       = 0;
     int    n_kf           = 0;      /*< 窗口残留关键帧 */
     int    n_kf_total     = 0;      /*< 累计处理的关键帧 */
+    int    n_prior_added  = 0;      /*< 边缘化先验成功加入问题的次数 */
     int    n_gnss_used    = 0;
     int    n_static_frames = 0;
     double total_time     = 0.0;
@@ -2433,6 +2330,10 @@ struct ErrorAccumulator {
 /* ============================================================================
  * 滑窗图优化管理器
  * ==========================================================================*/
+/* 先验里每个参数块的**身份**。不能存裸指针：std::vector<Frame> 会 reallocate，
+ * 滑窗也会 erase，指针会失效；每次使用前按身份重新解析。 */
+enum class PriorRefKind { CALIB, FRAME_POSE, FRAME_MIX, AMB };
+
 class GraphOptimizer {
 public:
     /* 配置 -----------------------------------------------------------------*/
@@ -2447,8 +2348,8 @@ public:
         /* 标定模式：true 时把标定参数块作为自由变量参与优化；
          * false（导航模式）时固定标定参数块。 */
         bool   calib_mode = false;
-        vect3  odo_abv{0.0, 0.0, 0.0};    /*< 安装角 [pitch, 0, yaw]，rad */
-        vect3  odo_lvOD{0.0, 0.0, 0.0};   /*< 杆臂（b 系，m） */
+        Eigen::Vector3d  odo_abv{0.0, 0.0, 0.0};    /*< 安装角 [pitch, 0, yaw]，rad */
+        Eigen::Vector3d  odo_lvOD{0.0, 0.0, 0.0};   /*< 杆臂（b 系，m） */
 
         bool   use_visual    = false;
         double visual_sigma  = 1.5 / 460.0;
@@ -2468,7 +2369,7 @@ public:
         double if_sigma            {0.02};
         double clk_rw_sigma        {1.0e-3};
         double clk_drift_rw_sigma  {1.0e-4};
-        vect3  gnss_ant_lever       {0.0, 0.0, 0.0};
+        Eigen::Vector3d  gnss_ant_lever       {0.0, 0.0, 0.0};
     };
 
     GraphOptimizer() = default;
@@ -2480,13 +2381,13 @@ public:
     /* 主入口 ---------------------------------------------------------------
      * 传入滑窗内所有关键帧，输出优化结果（原地更新 frames 的参数块）。
      * 若滑窗超限，会自动边缘化最旧帧并把先验保留在内部。 */
-    bool optimize(std::vector<Frame> &frames, const vect3 &g_n);
+    bool optimize(std::vector<Frame> &frames, const Eigen::Vector3d &g_n);
 
     /* 访问器 */
-    const mat  &J_prior(void) const { return J_prior_; }
-    const vect &r_prior(void) const { return r_prior_; }
-    bool  hasPrior(void) const { return J_prior_.row > 0; }
-    void  clearPrior(void) { J_prior_ = mat(); r_prior_ = vect(); }
+    const Eigen::MatrixXd  &J_prior(void) const { return J_prior_; }
+    const Eigen::VectorXd  &r_prior(void) const { return r_prior_; }
+    bool  hasPrior(void) const { return prior_ && prior_->J.rows() > 0; }
+    void  clearPrior(void) { prior_.reset(); J_prior_.resize(0, 0); r_prior_.resize(0); }
 
     void setCalibState(const CalibState &c) { c.toData(calib_data_.data()); }
     CalibState getCalibState() const { CalibState c; c.fromData(calib_data_.data()); return c; }
@@ -2494,37 +2395,70 @@ public:
     std::map<int, double>&       invDepths()       { return inv_depths_; }
     const std::map<int, double>& invDepths() const { return inv_depths_; }
 
-    void setFrameContext(const mat3& R_en, const vect3& p0_ecef) {
+    void setFrameContext(const Eigen::Matrix3d& R_en, const Eigen::Vector3d& p0_ecef) {
         R_en_m3_ = R_en; p0_ecef_v3_ = p0_ecef;
     }
-    void setBasePosEcef(const vect3& p) { base_pos_v3_ = p; }
+    void setBasePosEcef(const Eigen::Vector3d& p) { base_pos_v3_ = p; }
 
     bool extractAmbiguityCovariance(ceres::Problem& problem, Eigen::MatrixXd& Q_NN);
-    std::map<int, std::array<double, 1>>& ambiguities() { return ambiguities_; }
+    AmbMap& ambiguities() { return ambiguities_; }
 
 private:
     /* 组装 Ceres 问题：把 frames 的所有因子加进去 */
-    void buildProblem(ceres::Problem &problem, std::vector<Frame> &frames,  const vect3 &g_n);
+    void buildProblem(ceres::Problem &problem, std::vector<Frame> &frames,
+                      const Eigen::Vector3d &g_n, std::vector<double*> *ordered = nullptr);
 
-    /* 边缘化最旧帧：从 problem 中提取相关残差，Schur 补消去，
-     * 输出新的先验 (J_prior_, r_prior_)。 */
-    bool marginalizeOldestFrame(ceres::Problem &problem, std::vector<Frame> &frames, const mat  &J_prior_old, const vect  &r_prior_old);
+    /* 先验块的引用信息 */
+    struct PriorBlockRef {
+        PriorRefKind kind{PriorRefKind::CALIB};
+        double       time{0.0};   /*< FRAME_POSE / FRAME_MIX 用 */
+        AmbKey       amb{0};      /*< AMB 用 */
+    };
+    /* 一次边缘化产出的先验：J/r 是切空间上的信息形式，
+     * refs/meta 描述每个保留参数块（身份 + ambient/tangent/线性化点）。 */
+    struct PriorSpec {
+        Eigen::MatrixXd              J;
+        Eigen::VectorXd              r;
+        std::vector<PriorBlockRef>   refs;
+        std::vector<MargPriorBlock>  meta;
+    };
 
+public:
+    /* 边缘化最旧帧：只取"触及 frames[0]"的残差块做 Schur 补，
+     * 消去 frames[0] 的切空间变量，产出新的先验 prior_。
+     * 调用方随后可以安全地 erase 掉 frames[0]。
+     * （public：runRealData 是自由函数，需要在出窗前调用它。） */
+    bool marginalizeOldestFrame(std::vector<Frame> &frames, const Eigen::Vector3d &g_n);
+
+private:
+    /* 把 prior_ 的块身份解析成当前问题的参数块指针；顺序与 prior_->meta 一致 */
+    bool resolvePriorPointers(const std::vector<Frame> &frames, std::vector<double*> &out);
+
+public:
     Options opt_;
-    mat  J_prior_;   /*< 上一次边缘化的先验信息矩阵 */
-    vect r_prior_;   /*< 上一次边缘化的先验信息向量 */
+    Eigen::MatrixXd  J_prior_;   /*< 上一次边缘化的先验信息矩阵（镜像，供上层查看） */
+    Eigen::VectorXd  r_prior_;   /*< 上一次边缘化的先验信息向量（镜像） */
+    std::shared_ptr<PriorSpec> prior_;   /*< 真正的先验（按块描述） */
     std::array<double, NUM_CALIB> calib_data_{};
     std::map<int, double> inv_depths_;
 
-    mat3  R_en_m3_{1, 0, 0, 0, 1, 0, 0, 0, 1};
-    vect3 p0_ecef_v3_{0.0, 0.0, 0.0};
-    vect3 base_pos_v3_{0.0, 0.0, 0.0};
-    std::map<int, std::array<double, 1>> ambiguities_;
+    Eigen::Matrix3d  R_en_m3_ = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d p0_ecef_v3_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d base_pos_v3_ = Eigen::Vector3d::Zero();
+    AmbMap ambiguities_;
+    /* 各频率槽最近一次的参考星，用于检测参考星切换 */
+    std::map<int, int> amb_last_ref_;
+    /* 本窗口实际加入问题的模糊度键，用于清理陈旧键 */
+    std::set<AmbKey> amb_used_keys_;
+    bool amb_warned_basepos_{false};  /*< 基准站坐标无效只告警一次 */
+    bool prior_drop_warned_{false};   /*< 先验块对不上只告警一次 */
+    bool amb_warned_nodata_{false};   /*< 无 DD 数据只告警一次 */
 
 public:
     /* 求解统计（供上层评估计算量与收敛性） */
     int    stat_solves{0};       /*< 调用 solve 的次数 */
     int    stat_converged{0};    /*< 正常收敛的次数 */
+    int    stat_prior_blocks_added{0}; /*< 实际加入问题的先验因子个数 */
     int    stat_iterations{0};   /*< 迭代次数累计 */
     double stat_time_s{0.0};     /*< 求解累计耗时 (s) */
     std::string last_message;    /*< 最近一次求解的结束信息 */
@@ -2542,33 +2476,12 @@ inline double asinEx(double x) { return std::asin(range(x, -1.0, 1.0)); }
 double norm(const double *pd, int n);
 double norm1(const double *pd, int n);
 double normInf(const double *pd, int n);
-int IsZeros(const vect3 &v, double eps = EPS);
-int IsZero(const double &val, double eps = EPS);
-uint8_t IsZerosXY(const vect3 &v, double eps = EPS);
-uint8_t IsNaN(const vect3 &v);
-double diffYaw(double yaw, double yaw0);
-vect3 abs(const vect3 &v);
-vect3 maxabs(const vect3 &v1, const vect3 &v2);
-double norm(const vect3 &v);
-double normInf(const vect3 &v);
-double normXY(const vect3 &v);
-double normXYInf(const vect3 &v);
-vect3 sqrt(const vect3 &v);
-vect3 pow(const vect3 &v, int k);
-double dot(const vect3 &v1, const vect3 &v2);
-vect3 dotmul(const vect3 &v1, const vect3 &v2);
-mat3 vxv(const vect3 &v1, const vect3 &v2);
-double sinAng(const vect3 &v1, const vect3 &v2);
-vect3 sort(const vect3 &v);
-vect3 randn(const vect3 &mu, const vect3 &sigma);
-double MKQt(double sR, double tau);
-vect3 MKQt(const vect3 &sR, const vect3 &tau);
 
 /* ============================ 融合 ============================ */
 void fusion(double *x1, double *p1, const double *x2, const double *p2, int n = 9,
             double *xf = nullptr, double *pf = nullptr);
-void fusion(vect3 &x1, vect3 &p1, const vect3 x2, const vect3 p2);
-void fusion(vect3 &x1, vect3 &p1, const vect3 x2, const vect3 p2, vect3 &xf, vect3 &pf);
+void fusion(Eigen::Vector3d &x1, Eigen::Vector3d &p1, const Eigen::Vector3d x2, const Eigen::Vector3d p2);
+void fusion(Eigen::Vector3d &x1, Eigen::Vector3d &p1, const Eigen::Vector3d x2, const Eigen::Vector3d p2, Eigen::Vector3d &xf, Eigen::Vector3d &pf);
 
 
 
@@ -2634,10 +2547,12 @@ void poseMinus(const double *y, const double *x, double *y_minus_x);
 /* 累积法方程：H += Jᵀ J, b += Jᵀ r
  * 说明：J 的行数对应残差个数（J.row == r.rc），列数对应变量维数。
  *      H 与 b 若为空（row == 0）将按 J.clm 自动初始化。 */
-void accumulate_normal_equations(const mat &J, const vect &r, mat &H, vect &b);
+void accumulate_normal_equations(const Eigen::MatrixXd &J, const Eigen::VectorXd &r,
+                                 Eigen::MatrixXd &H, Eigen::VectorXd &b);
 
 /* Schur 补边缘化，返回 false 表示维数非法或数值分解失败 */
-bool schur_complement(const mat &H, const vect &b, int num_marginalized, mat &J_out, vect &r_out);
+bool schur_complement(const Eigen::MatrixXd &H, const Eigen::VectorXd &b, int num_marginalized,
+                      Eigen::MatrixXd &J_out, Eigen::VectorXd &r_out);
 
 std::map<double, std::vector<VisualObs>>
 preprocessImages(const std::string& cam_dir,  const CameraModel& cam,
@@ -2681,6 +2596,259 @@ inline bool isValidGnss(const DataSensor281_t &s) {
 
 RunnerStats runRealData(const std::string &bin_path, const RunnerOptions &opt,  const std::string &out_nav_path = "");
 RunnerStats runRealData(const std::vector<DataSensor281_t> &raw,  const RunnerOptions &opt, const std::string &out_nav_path = "");
+
+
+/* ============================================================================
+ * 以下为原 src/amb_ils.h 的内容（模糊度整数最小二乘），已并入本头文件
+ * ==========================================================================*/
+/* ============================================================================
+ * 模糊度整数最小二乘（ILS / LAMBDA 风格）—— 原 amb_ils.h，已并入本文件
+ *
+ * 给定浮点模糊度 a 与其协方差 Q，求
+ *      â = argmin_{z ∈ Z^n} (z − a)ᵀ Q⁻¹ (z − a)
+ * 并给出 ratio 检验所需的次优二次型。
+ *
+ * 做法（Teunissen 的 LAMBDA 路线）：
+ *   1. 整数 Gauss 变换 + 按条件方差重排，把 Q 去相关 → Qz = Tᵀ Q T（T 整数、|det T| = 1）
+ *      去相关只影响**搜索效率**，不影响 ILS 的解（整数幺模变换是格上的一一映射）。
+ *   2. 在 Qz 的 LDLᵀ 条件分解上做椭球枚举，用引导解（条件取整）先给出上界。
+ *   3. 变换回原空间：a_fixed = T⁻ᵀ z_fixed。
+ *
+ * 正确性由 test_ils.cpp 用**暴力枚举**在小规模问题上逐例对照（这是唯一的保证方式）。
+ * 若枚举节点数超过上限，返回 ok = false（保守：宁可判"未固定"，不给可能错的固定解）。
+ * ==========================================================================*/
+
+
+struct IlsResult {
+    bool            ok{false};        /*< 枚举是否正常完成（false 表示不可信） */
+    int             n{0};
+    Eigen::VectorXd a_float;
+    Eigen::VectorXd a_fixed;          /*< ILS 最优整数解（原空间） */
+    Eigen::VectorXd a_boot;           /*< 引导解（条件取整），用于对照 */
+    double          sq_best{0.0};     /*< 最优二次型 */
+    double          sq_second{0.0};   /*< 次优二次型 */
+    double          ratio{0.0};       /*< sq_second / sq_best */
+    double          ratio_boot{0.0};  /*< 次优(相对引导解) / 最优，用于对照 */
+    double          p_boot{0.0};      /*< Bootstrapped 成功率 */
+    long            nodes{0};         /*< 枚举节点数 */
+    int             n_decorr{0};      /*< 去相关的 Gauss 变换次数 */
+    double          cond_before{0.0}; /*< 去相关前 Q 的条件数（对角比） */
+    double          cond_after{0.0};  /*< 去相关后 */
+    /* 条件标准差（原空间序）：来自原始 Q 的 LDLᵀ 的 D 开方。
+     * 用来判断"哪些模糊度最有把握"，是部分固定的排序依据。 */
+    Eigen::VectorXd cond_sigma;
+    /* 诊断用：整数变换矩阵与它的逆（Ti = T⁻ᵀ），满足 Ti·Tᵀ = I */
+    Eigen::MatrixXd T_mat;
+    Eigen::MatrixXd Ti_mat;
+};
+
+/* ratio 门限：ratio > ratio_thresh 判为可固定（常用 2~3） */
+bool ilsResolve(const Eigen::VectorXd &a, const Eigen::MatrixXd &Q,
+                IlsResult *out, double ratio_thresh = 3.0, long max_nodes = 4000000L);
+
+/* ---- 部分固定（partial AR） ----
+ * 整组 ratio 不够时，按条件标准差从小到大保留最有把握的子集，
+ * 逐步缩小固定维数直到 ratio 超门限，返回**能通过的最大子集**。 */
+struct IlsPartial {
+    bool            ok{false};
+    std::vector<int> fixed_idx;      /*< 被固定的模糊度下标（原空间，升序） */
+    Eigen::VectorXd a_fixed;         /*< 全长：被固定的取整数，其余保持浮点值 */
+    IlsResult       last;            /*< 最后一次成功固定的子集 ILS 结果 */
+    int             n_tried{0};      /*< 尝试过的子集个数 */
+    int             n_full{0};       /*< 模糊度总数 */
+    Eigen::VectorXd cond_sigma;      /*< 条件标准差（原空间序） */
+};
+
+bool ilsPartialFix(const Eigen::VectorXd &a, const Eigen::MatrixXd &Q,
+                   double ratio_thresh, int min_fix, long max_nodes,
+                   IlsPartial *out);
+
+/* 暴力参照实现：在 round(a) ± range 内枚举全部整数格点（只用于小规模测试） */
+bool ilsResolveBrute(const Eigen::VectorXd &a, const Eigen::MatrixXd &Q,
+                     int range, IlsResult *out);
+
+/* ============================================================================
+ * 以下为原 src/gnss_dd.h 的内容（RINEX → 双差 DDObs 生产者），已并入本头文件
+ * ==========================================================================*/
+/* ============================================================================
+ * 从 RINEX 观测/星历生成 Frame::dd_obs —— 原 gnss_dd.h，已并入本文件
+ *
+ * 背景：工程里原来有一套 GNSS 双差紧组合的残差（GnssDD*Residual）与模糊度管理，
+ * 但**没有任何地方生产 dd_obs**，`Frame::has_gnss_raw` 永远是 false，
+ * 整条紧组合路径是死代码。这里补上生产者：读 RINEX 3 观测 + 广播星历，
+ * 按残差期望的约定生成 DDObs。
+ *
+ * 符号约定（与 GnssDDPseudorangeFreqResidual / GnssDDCarrierFreqResidual 严格一致）：
+ *     dd_X[f] = (X_rover^i − X_rover^k) − (X_base^i − X_base^k)
+ *   i = DDObs::sat（非参考星），k = DDObs::ref_sat（参考星）
+ *   dd_P 单位 m；dd_L 单位**周**（残差里再乘 λ）；dd_D 单位 Hz
+ *   sat_i = DDObs::sat 的星历状态，sat_k = DDObs::ref_sat 的星历状态
+ *
+ * 参考星**按系统分别选取**（跨系统的双差含系统间偏差，不能混）。
+ *
+ * 时间：统一用「自 GPS 纪元 1980-01-06 00:00:00 起的秒」，两个文件同为 GPS 时。
+ * ==========================================================================*/
+
+
+
+/* ============================ 时间 ============================ */
+/* 公历 → 自 1980-01-06 00:00:00 起的秒 */
+double civilToGpsSec(int year, int month, int day, int hour, int minute, double sec);
+/* 反向，便于打印 */
+void gpsSecToCivil(double t_gps, int *year, int *month, int *day,
+                   int *hour, int *minute, double *sec);
+
+/* ============================ 观测文件 ============================ */
+/* 一次"要读的信号"请求：系统号 + 观测类型码，例如 {'G', "L1C"} */
+struct ObsRequest {
+    char        sys{'G'};
+    std::string type;       /*< 观测类型码，如 C1C / L1C / C2W / L2W / D1C */
+};
+
+/* 单个卫星在某一历元的观测（按请求顺序排列） */
+struct RinexSatObs {
+    char sys{0};
+    int  prn{0};
+    std::array<double, 12> val{};
+    std::array<int, 12>    lli{};   /*< 失锁指示（RINEX 3 的 LLI 位） */
+    std::array<int, 12>    snr{};
+    std::array<bool, 12>   has{};
+
+    double v(int k) const   { return val[static_cast<size_t>(k)]; }
+    bool   ok(int k) const  { return has[static_cast<size_t>(k)]; }
+};
+
+struct RinexEpoch {
+    double t{0.0};               /*< 自 GPS 纪元的秒 */
+    int    flag{0};              /*< 历元标志：0 正常，1 本历元前有失锁 */
+    std::vector<RinexSatObs> sats;
+};
+
+struct RinexObsHeader {
+    double          version{0.0};
+    double          interval{0.0};
+    Eigen::Vector3d approx_pos{Eigen::Vector3d::Zero()};  /*< ECEF，可能为 0 */
+    bool            approx_pos_valid{false};
+    int             n_epochs{0};
+    double          t_first{0.0}, t_last{0.0};
+    std::map<char, std::vector<std::string>> obs_types;   /*< 每系统的类型表 */
+    std::string     marker;
+};
+
+/* 只读请求里列出的信号，避免把 112 MB 文件全塞进内存。
+ * reqs 的顺序决定了 RinexSatObs::val/has 的下标。 */
+bool readRinex3Obs(const std::string &path,
+                   const std::vector<ObsRequest> &reqs,
+                   std::vector<RinexEpoch> &epochs,
+                   RinexObsHeader *hdr = nullptr);
+
+/* ============================ 广播星历 ============================ */
+struct KeplerEph {
+    char   sys{'G'};
+    int    prn{0};
+    int    week{0};
+    double toe{0.0}, toc{0.0};
+    double af0{0.0}, af1{0.0}, af2{0.0};
+    double M0{0.0}, delta_n{0.0}, e{0.0}, sqrt_a{0.0};
+    double OMEGA0{0.0}, i0{0.0}, omega{0.0}, OMEGA_DOT{0.0}, idot{0.0};
+    double Cuc{0.0}, Cus{0.0}, Crc{0.0}, Crs{0.0}, Cic{0.0}, Cis{0.0};
+    double tgd{0.0};
+    double accuracy{0.0}, health{0.0};
+    bool   valid{false};
+};
+
+/* RINEX 3 混合导航文件（.22p / .22n / .22c 都能读）；
+ * 解析 GPS/伽利略/QZSS/BDS 的 Kepler 型记录；GLONASS 跳过并计数。 */
+bool readRinex3Nav(const std::string &path,
+                   std::map<char, std::map<int, std::vector<KeplerEph>>> &out,
+                   int *n_glonass_skipped = nullptr);
+
+/* 由广播星历算信号发射时刻的卫星 ECEF 位置与钟差（含传播时延与地球自转改正）。
+ *   t_rx  : 接收时刻（GPS 秒）
+ *   clk   : 输出卫星钟差（秒，含相对论改正），可为 nullptr */
+bool satPosFromEph(const KeplerEph &eph, double t_tx,
+                   Eigen::Vector3d &pos, double *clk = nullptr);
+
+/* ============================ 双差生产 ============================ */
+/* 一个频率槽上的三种信号码。空串表示该测站/该槽没有这种观测。 */
+struct DdSignal {
+    char        sys{'G'};
+    std::string code_P;   /*< 伪距，如 C1C */
+    std::string code_L;   /*< 载波相位，如 L1C */
+    std::string code_D;   /*< 多普勒，如 D1C（可空） */
+};
+
+struct DdBuildConfig {
+    Eigen::Vector3d  base_ecef{Eigen::Vector3d::Zero()};    /*< 基准站 ECEF（必须显式给） */
+    Eigen::Vector3d  rover_approx{Eigen::Vector3d::Zero()}; /*< 流动站近似 ECEF（选参考星/仰角用） */
+    std::vector<DdSignal> slots;       /*< 依次对应 DDObs 的 slot 0,1,2…；最多 MAX_FREQ 个 */
+    double elev_mask_deg{10.0};
+    double max_base_dt{0.05};          /*< 流动站/基准站历元最大允许时差（s） */
+    int    min_sats{4};                /*< 少于该卫星数不出双差 */
+    bool   use_lli_slip{true};         /*< LLI 置位时标记周跳 */
+    /* MW 周跳门限（周）。DD MW 的单历元噪声约 0.35 周（λ_WL=0.862 m 对
+     * 0.4 m 的码噪声），因此门限取 1.5 周 ≈ 3σ，并改用"与弧段均值的偏差"
+     * 而非"与上一历元的差"。早先取 0.75 周 + 逐历元差分，实测 11007 个 DD
+     * 误报 17184 次周跳，把弧段切碎、模糊度从 18 涨到 30。 */
+    double mw_slip_thresh{2.5};        /*< MW 周跳门限（周）；<=0 关闭 */
+    int    mw_min_samples{30};         /*< 滑动窗口至少要这么多历元才判跳变 */
+    int    mw_window{50};              /*< 滑动窗口长度（历元）。
+                                        * 必须用**滑窗**而不是累积均值：MW 随卫星移动缓慢漂移，
+                                        * 累积均值跟不上，偏差迟早越限 → 周期性假周跳。 */
+    /* 稳定参考星：按"整个窗口内可用历元数最多"选一颗并在窗口内固定使用。
+     * 这能让模糊度键（含 ref_sat）保持稳定，维数不再随参考星切换而膨胀
+     * （实测 120 历元窗口：逐历元选星 40 个模糊度 → 稳定选星 18 个）。
+     * 某历元若选定参考星不可用，则跳过该系统（换参考星会引入新参数）。 */
+    bool   stable_reference{true};
+};
+
+/* 一个历元的双差结果 + 诊断 */
+struct DdEpochResult {
+    double t{0.0};
+    int    ref_prn{0};                 /*< 第一个系统的参考星（诊断用） */
+    std::vector<DDObs> dd;
+    /* 与 dd 一一对应：该星在每个槽上是否检测到周跳（LLI 或 MW） */
+    std::vector<std::array<bool, MAX_FREQ>> slip;
+    int    n_common{0};                /*< 双站共同可见且仰角合格的卫星数 */
+    int    n_used{0};                  /*< 实际形成双差的卫星数 */
+    int    n_sys{0};                   /*< 参与的系统数 */
+};
+
+/* 双差的 MW（Melbourne-Wübbena）宽巷模糊度，单位周。
+ * 需要 f1/f2 两个槽的 P 与 L 都有效；否则返回 false。 */
+bool ddMelbourneWubbena(const DDObs &dd, int f1, int f2, double *n_wl);
+
+/* 组双差的统计（可选输出，便于诊断参考星策略的效果） */
+struct DdBuildStats {
+    int n_epochs_rover{0};        /*< 输入的流动站历元数 */
+    int n_no_base{0};             /*< 找不到对齐的基准站历元 */
+    int n_too_few{0};             /*< 共同可见卫星不足 min_sats */
+    int n_ref_missing{0};         /*< 选定参考星在该历元不可用而跳过（按系统计） */
+    int n_epochs_out{0};          /*< 最终产出的历元数 */
+    int n_slip{0};                /*< 判出的周跳次数（按 (DD,槽) 计） */
+    std::map<char, int> chosen_ref;   /*< 系统 → 全窗口参考星 PRN */
+};
+
+/* 把 rover/base 的观测配对（按时间）、算卫星位置、组双差。 */
+bool buildDdEpochs(const std::vector<RinexEpoch> &rover,
+                   const std::vector<RinexEpoch> &base,
+                   const std::map<char, std::map<int, std::vector<KeplerEph>>> &eph,
+                   const DdBuildConfig &cfg,
+                   std::vector<DdEpochResult> &out,
+                   DdBuildStats *stats = nullptr);
+
+/* 由 slots 生成读取用的请求表（顺序固定：每个 slot 依次 P/L/D），
+ * 便于调用方用同一份 reqs 去读流动站与基准站。 */
+std::vector<ObsRequest> buildObsRequests(const std::vector<DdSignal> &slots,
+                                         std::vector<std::array<int, 3>> *slot_index);
+
+/* 把 DdEpochResult 按时间装进 Frame（设置 dd_obs / has_gnss_raw）。
+ *   t_offset : gps_sec = frame_time + t_offset
+ *   tol      : 时间匹配容差（s）
+ * 返回成功挂上的帧数。 */
+int attachDdToFrames(std::vector<Frame> &frames,
+                     const std::vector<DdEpochResult> &dd_epochs,
+                     double t_offset, double tol = 0.6);
 
 #endif
 
